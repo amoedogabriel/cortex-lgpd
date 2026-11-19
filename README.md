@@ -13,6 +13,7 @@ O sistema foi concebido especificamente para a realidade de infraestrutura das u
 - **Servidores sem GPU dedicada:** Toda a inferência de OCR (`rapidocr-onnxruntime` via `onnxruntime`) e Processamento de Linguagem Natural (`spaCy` + `EntityRuler` institucional + Regex pré-compilados + Validadores Matemáticos de dígitos verificadores) roda em CPU com modelos pré-aquecidos em memória RAM (*Model Pre-Warming Singleton*), eliminando *cold starts*.
 - **Estações de Trabalho Antigas (PCs de 10 a 15 anos):** O frontend **não utiliza `PDF.js` nem `react-pdf`**. Cada página do PDF é renderizada no servidor a 150 DPI como uma imagem `.webp` otimizada (~80 a 120 KB) e exibida em um **DOM Virtualizado de Página Única** (`<img decoding="async" />`) sobreposto por uma única camada vetorial `<svg viewBox="0 0 1000 1000">`. O desenho de tarjas manuais opera a **60 FPS** via manipulação direta de DOM com `useRef` (zero re-render no `onMouseMove`).
 - **Pipeline Progressivo *First-Page-First* (SSE):** Ao enviar um documento multipágina, o backend processa a **Página 1 com prioridade imediata** (~1,0 a 1,5s), libera o Workspace de Revisão (`PARTIAL_REVIEW_READY`) e transmite as páginas `2..N` em tempo real via **Server-Sent Events (SSE)** + Redis Pub/Sub.
+- **Regras Regex Personalizadas *(branch `feat/melhorias-funcionalidade`)*:** Painel opcional colapsável na área de upload (`CustomRegexPanel`) e campo opcional `custom_regexes` em `POST /api/v1/documents/upload`, permitindo cadastrar até 20 padrões específicos da unidade (com categoria LGPD, ação padrão `BLACKOUT`/`PARTIAL_MASK`, diferenciação de maiúsculas/minúsculas e validação anti-ReDoS / anti-match vazio). As detecções aparecem no workspace como `CUSTOM:<NOME>` (`CUSTOM_REGEX`) sem alterar o fluxo padrão quando omitido.
 - **Política *Zero-PII* em Logs, Banco de Dados e Relatórios:** Nem o banco de dados PostgreSQL (`audit_logs`), nem os logs estruturados JSON (`ZeroPIIFilter`), nem o Relatório Institucional em PDF armazenam ou reproduzem CPFs, nomes ou textos extraídos dos documentos.
 
 ```mermaid
@@ -95,6 +96,7 @@ A suíte de backend contempla:
 - `tests/test_quality_and_sla.py`: Benchmark sobre base sintética de 10 páginas aferindo `Precision`, `Recall`, `F1-Score`, `Mean IoU` e cumprimento dos SLAs (`Página 1 < 1,8s`, `Análise 10p < 3,0s`, `Redação + Validação 10p < 2,0s`);
 - `tests/test_security.py`: Bloqueio de `/JavaScript` e `/Launch`, isolamento de diretórios temporários e garantia de `Zero-PII` nos logs e banco;
 - `tests/test_gold_standard_suite.py`: Suíte *"Padrão Ouro"* ponta a ponta (sem mocks) validando tabelas estreitas multi-linha, PDFs 100% escaneados via OCR ONNX, transição dinâmica entre `BLACKOUT` e `PARTIAL_MASK` no mesmo `job_id` e auditoria *Zero-PII* do `report.pdf`.
+- `tests/test_custom_regex.py` *(branch `feat/melhorias-funcionalidade`)*: Validação de sintaxe, proteção anti-ReDoS/match vazio, detecção no pipeline híbrido, destruição física no PDF e integração REST em `/api/v1/documents/upload`.
 
 ### 4.2. Testes Automatizados de Frontend e End-to-End (`TypeScript` & `Playwright`)
 No diretório `frontend/`:
@@ -105,7 +107,7 @@ No diretório `frontend/`:
    npm run build
    ```
 2. **Testes de caracterização de UI e comportamento (`e2e/ui_characterization.spec.ts`):**
-   Valida de forma determinística (via interceptação de rede) o fluxo completo de 7 etapas, alternância entre múltiplos documentos na fila, atalhos de teclado, modos `Tarjar` / `Mascarar` / `Manter`, sincronização por `group_id` e integridade das coordenadas SVG:
+   Valida de forma determinística (via interceptação de rede) o fluxo completo de 7 etapas, alternância entre múltiplos documentos na fila, atalhos de teclado, modos `Tarjar` / `Mascarar` / `Manter`, sincronização por `group_id`, integridade das coordenadas SVG e (na branch `feat/melhorias-funcionalidade`) o painel opcional de regex personalizado:
    ```bash
    npx playwright test e2e/ui_characterization.spec.ts
    ```
