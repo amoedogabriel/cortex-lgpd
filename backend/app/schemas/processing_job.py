@@ -10,6 +10,50 @@ from app.models.enums import ConfidenceLevel, DataCategory, JobStatus, Redaction
 SHA256_REGEX = r"^[a-fA-F0-9]{64}$"
 
 
+class CustomRegexRule(BaseModel):
+    """Regra de expressão regular personalizada informada pelo usuário para a sessão."""
+
+    label: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="Nome identificador da regra personalizada (ex.: PORTARIA_INTERNA).",
+    )
+    pattern: str = Field(
+        ...,
+        min_length=1,
+        max_length=300,
+        description="Expressão regular aplicada sobre o texto extraído das páginas.",
+    )
+    category: DataCategory = Field(
+        default=DataCategory.PERSONAL_COMMON,
+        description="Categoria estrita da taxonomia LGPD atribuída às ocorrências encontradas.",
+    )
+    action_mode: RedactionActionMode | None = Field(
+        default=None,
+        description="Modo inicial opcional (`BLACKOUT` ou `PARTIAL_MASK`) para as ocorrências desta regra.",
+    )
+    case_sensitive: bool = Field(
+        default=False,
+        description="Quando False (padrão), ignora diferenciação entre maiúsculas e minúsculas.",
+    )
+
+    @field_validator("label")
+    @classmethod
+    def normalize_label(cls, v: str) -> str:
+        cleaned = " ".join(v.strip().split())
+        if not cleaned:
+            raise ValueError("O nome identificador da regra regex não pode ser vazio.")
+        return cleaned
+
+    @field_validator("pattern")
+    @classmethod
+    def validate_non_empty_pattern(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("O padrão regex personalizado não pode ser vazio.")
+        return v
+
+
 class RedactionItem(BaseModel):
     """Item de decisão de redação por ocorrência (BLACKOUT, PARTIAL_MASK ou KEEP)."""
 

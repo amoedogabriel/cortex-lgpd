@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable, Sequence
 
-from app.models.enums import DataCategory
+from app.models.enums import DataCategory, RedactionActionMode
 from app.services.pii_detector.validators import (
     strip_non_digits,
     validate_cnh,
@@ -21,6 +21,10 @@ from app.services.pii_detector.validators import (
     validate_pis_pasep_nit,
     validate_titulo_eleitor,
 )
+
+MAX_CUSTOM_REGEX_RULES: int = 20
+MAX_CUSTOM_REGEX_LENGTH: int = 300
+_REDOS_NESTED_QUANTIFIER_RE = re.compile(r"\((?:[^()\\]|\\.)*[*+?{][^()]*\)\s*(?:[*+?]|{\d)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +38,8 @@ class RegexPatternSpec:
     base_confidence: float = 0.92
     validator: Callable[[str], bool] | None = None
     requires_context: bool = False
+    preferred_action_mode: RedactionActionMode | None = None
+    is_custom: bool = False
 
 
 # ==============================================================================
@@ -663,9 +669,86 @@ COMPILED_REGEX_SPECS: tuple[RegexPatternSpec, ...] = (
     ),
 )
 
+
+def compile_custom_regex_specs(raw_rules: Sequence[Any] | None) -> list[RegexPatternSpec]:
+    """
+    Valida e compila regras de expressões regulares personalizadas informadas pelo usuário.
+    Protege contra ReDoS (quantificadores aninhados, tamanho excessivo) e padrões que casam string vazia.
+    """
+    if not raw_rules:
+        return []
+    if len(raw_rules) > MAX_CUSTOM_REGEX_RULES:
+        raise ValueError(
+            f"Limite máximo de {MAX_CUSTOM_REGEX_RULES} regras regex personalizadas excedido."
+        )
+
+    compiled_specs: list[RegexPatternSpec] = []
+    for idx, rule in enumerate(raw_rules, start=1):
+        if isinstance(rule, dict):
+            raw_label = str(rule.get("label", "") or "")
+            raw_pattern = str(rule.get("pattern", "") or "")
+            raw_cat = rule.get("category", DataCategory.PERSONAL_COMMON)
+            raw_mode = rule.get("action_mode", None)
+            case_sensitive = bool(rule.get("case_sensitive", False))
+        else:
+            raw_label = str(getattr(rule, "label", "") or "")
+            raw_pattern = str(getattr(rule, "pattern", "") or "")
+            raw_cat = getattr(rule, "category", DataCategory.PERSONAL_COMMON)
+            raw_mode = getattr(rule, "action_mode", None)
+            case_sensitive = bool(getattr(rule, "case_sensitive", False))
+
+        clean_label = " ".join(raw_label.strip().split())[:64] or f"REGRA_{idx}"
+        if not raw_pattern or not raw_pattern.strip():
+            raise ValueError(f"A regra regex '{clean_label}' possui padrão vazio.")
+        if len(raw_pattern) > MAX_CUSTOM_REGEX_LENGTH:
+            raise ValueError(
+                f"A regra regex '{clean_label}' excede o limite de {MAX_CUSTOM_REGEX_LENGTH} caracteres."
+            )
+        if _REDOS_NESTED_QUANTIFIER_RE.search(raw_pattern):
+            raise ValueError(
+                f"A regra regex '{clean_label}' contém quantificadores aninhados potencialmente inseguros (ReDoS)."
+            )
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            compiled = re.compile(raw_pattern, flags)
+        except re.error as exc:
+            raise ValueError(
+                f"Sintaxe inválida na regra regex '{clean_label}': {exc}"
+            ) from exc
+
+        if compiled.match("") is not None:
+            raise ValueError(
+                f"A regra regex '{clean_label}' casa texto vazio e geraria marcações inválidas. Torne o padrão mais específico."
+            )
+
+        category = raw_cat if isinstance(raw_cat, DataCategory) else DataCategory(str(raw_cat))
+        preferred_mode: RedactionActionMode | None = None
+        if raw_mode is not None and str(raw_mode).strip():
+            preferred_mode = (
+                raw_mode if isinstance(raw_mode, RedactionActionMode) else RedactionActionMode(str(raw_mode))
+            )
+
+        compiled_specs.append(
+            RegexPatternSpec(
+                entity_type=f"CUSTOM:{clean_label}",
+                category=category,
+                pattern=compiled,
+                value_group=0,
+                base_confidence=0.99,
+                preferred_action_mode=preferred_mode,
+                is_custom=True,
+            )
+        )
+    return compiled_specs
+
+
 __all__ = [
     "RegexPatternSpec",
     "COMPILED_REGEX_SPECS",
+    "MAX_CUSTOM_REGEX_RULES",
+    "MAX_CUSTOM_REGEX_LENGTH",
+    "compile_custom_regex_specs",
     "RE_CPF_FORMATTED",
     "RE_CPF_LABELED",
     "RE_CNPJ_FORMATTED",

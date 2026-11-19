@@ -10,6 +10,7 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
+import { CustomRegexPanel } from "@/components/upload/CustomRegexPanel";
 import { DocumentProgressCard } from "@/components/upload/DocumentProgressCard";
 import { DropzoneUpload } from "@/components/upload/DropzoneUpload";
 import {
@@ -32,6 +33,7 @@ import {
 } from "@/services/api";
 import type {
   AnalysisCompleteEventPayload,
+  CustomRegexRule,
   DetectedOccurrence,
   DocumentQueueItemState,
   ManualRedactionBox,
@@ -64,7 +66,10 @@ const WORKFLOW_STEPS: WorkflowStep[] = [
 
 const MAX_CONCURRENT_UPLOADS = 2;
 
-function createQueuedDocument(file: File): DocumentQueueItemState {
+function createQueuedDocument(
+  file: File,
+  customRegexes?: CustomRegexRule[]
+): DocumentQueueItemState {
   const clientId = `doc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   return {
     clientId,
@@ -91,6 +96,7 @@ function createQueuedDocument(file: File): DocumentQueueItemState {
     downloadPdfUrl: null,
     downloadReportUrl: null,
     errorMessage: null,
+    customRegexes: customRegexes && customRegexes.length > 0 ? customRegexes : undefined,
     currentPage: 1,
     deselectedIds: [],
     actionModesById: {},
@@ -102,6 +108,7 @@ export default function HomePage() {
   const [documents, setDocuments] = useState<DocumentQueueItemState[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [showAddFilesDropzone, setShowAddFilesDropzone] = useState<boolean>(false);
+  const [customRegexRules, setCustomRegexRules] = useState<CustomRegexRule[]>([]);
 
   // Estado auxiliar do Workspace Split-Screen
   const [syncGroupByDefault, setSyncGroupByDefault] = useState<boolean>(true);
@@ -507,24 +514,29 @@ export default function HomePage() {
       }));
 
       try {
-        const res = await uploadPdfDocumentWithProgress(file, true, {
-          onUploadProgress: (pct) => {
-            updateDocument(clientId, (prev) =>
-              prev.badgeStatus === "Carregando" && prev.stageNumber === 1
-                ? { ...prev, progressPercent: pct }
-                : prev
-            );
+        const res = await uploadPdfDocumentWithProgress(
+          file,
+          true,
+          {
+            onUploadProgress: (pct) => {
+              updateDocument(clientId, (prev) =>
+                prev.badgeStatus === "Carregando" && prev.stageNumber === 1
+                  ? { ...prev, progressPercent: pct }
+                  : prev
+              );
+            },
+            onUploadBodySent: () => {
+              updateDocument(clientId, (prev) => ({
+                ...prev,
+                badgeStatus: "Processando",
+                stageNumber: 2,
+                stageLabel: PIPELINE_STAGE_LABELS[2],
+                progressPercent: null,
+              }));
+            },
           },
-          onUploadBodySent: () => {
-            updateDocument(clientId, (prev) => ({
-              ...prev,
-              badgeStatus: "Processando",
-              stageNumber: 2,
-              stageLabel: PIPELINE_STAGE_LABELS[2],
-              progressPercent: null,
-            }));
-          },
-        });
+          item.customRegexes
+        );
 
         const logs = res.verbose_logs || [];
         if (logs.length > 0) {
@@ -606,12 +618,15 @@ export default function HomePage() {
     }
   }, [documents, startUploadForItem]);
 
-  const handleFilesSelected = useCallback((files: File[]) => {
-    if (!files.length) return;
-    const queued = files.map((f) => createQueuedDocument(f));
-    setDocuments((prev) => [...prev, ...queued]);
-    setShowAddFilesDropzone(false);
-  }, []);
+  const handleFilesSelected = useCallback(
+    (files: File[]) => {
+      if (!files.length) return;
+      const queued = files.map((f) => createQueuedDocument(f, customRegexRules));
+      setDocuments((prev) => [...prev, ...queued]);
+      setShowAddFilesDropzone(false);
+    },
+    [customRegexRules]
+  );
 
   const handleSelectForReview = useCallback((clientId: string) => {
     setActiveDocId(clientId);
@@ -1314,6 +1329,11 @@ export default function HomePage() {
                     maxSizeMb={50}
                     compact
                   />
+                  <CustomRegexPanel
+                    rules={customRegexRules}
+                    onChange={setCustomRegexRules}
+                    disabled={hasAnyUploadInFlight}
+                  />
                 </div>
               </section>
             )}
@@ -1512,6 +1532,11 @@ export default function HomePage() {
                 uploadError={null}
                 maxSizeMb={50}
                 compact={false}
+              />
+              <CustomRegexPanel
+                rules={customRegexRules}
+                onChange={setCustomRegexRules}
+                disabled={hasAnyUploadInFlight}
               />
             </div>
           </section>

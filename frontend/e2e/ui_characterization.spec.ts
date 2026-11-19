@@ -637,4 +637,47 @@ test.describe("Caracterização de UI e Contrato Funcional (Pré/Pós-Refatoraç
     await page.getByTestId("back-to-edit-modes-btn").click();
     await expect(modal).toBeHidden();
   });
+
+  test("5. Painel opcional de regex personalizado valida, registra e envia custom_regexes no upload", async ({
+    page,
+  }) => {
+    const capturedUploadPayloads: string[] = [];
+    await setupMockBackend(page);
+    await page.route("**/api/v1/documents/upload*", async (route) => {
+      const postData = route.request().postData() || "";
+      capturedUploadPayloads.push(postData);
+      await route.fallback();
+    });
+
+    await page.goto("/");
+    await page.getByTestId("custom-regex-toggle-btn").click();
+
+    await page.getByTestId("custom-regex-label-input").fill("CODIGO_PROEG");
+    await page.getByTestId("custom-regex-pattern-input").fill("[invalido");
+    await expect(page.getByTestId("custom-regex-error")).toBeVisible();
+    await expect(page.getByTestId("custom-regex-add-btn")).toBeDisabled();
+
+    await page.getByTestId("custom-regex-pattern-input").fill("PROEG-\\d{4}-\\d{3}");
+    await expect(page.getByTestId("custom-regex-error")).toHaveCount(0);
+    await page.getByTestId("custom-regex-category-select").selectOption("PERSONAL_SENSITIVE");
+    await page.getByTestId("custom-regex-mode-select").selectOption("PARTIAL_MASK");
+    await page.getByTestId("custom-regex-add-btn").click();
+
+    await expect(page.getByTestId("custom-regex-panel")).toContainText("1 regra ativa");
+    await expect(page.getByTestId("custom-regex-panel")).toContainText("CODIGO_PROEG");
+
+    await page.getByTestId("pdf-file-input").setInputFiles([
+      {
+        name: "custom_doc.pdf",
+        mimeType: "application/pdf",
+        buffer: SAMPLE_PDF_BUFFER,
+      },
+    ]);
+    await expect(
+      page.getByRole("article", { name: /Progresso do documento custom_doc\.pdf/i })
+    ).toBeVisible({ timeout: 10000 });
+    expect(capturedUploadPayloads.length).toBe(1);
+    expect(capturedUploadPayloads[0]).toContain("CODIGO_PROEG");
+    expect(capturedUploadPayloads[0]).toContain("PERSONAL_SENSITIVE");
+  });
 });

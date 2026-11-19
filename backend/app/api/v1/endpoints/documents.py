@@ -13,13 +13,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from app.core.config import settings
 from app.models.enums import DataCategory, DocumentProfile, JobStatus, RedactionActionMode
-from app.schemas.processing_job import NormalizedBoundingBox, RedactionItem
+from app.schemas.processing_job import CustomRegexRule, NormalizedBoundingBox, RedactionItem
+from app.services.pii_detector.regex_patterns import compile_custom_regex_specs
 from app.services.pdf_extractor.file_validator import validate_and_store_pdf
 from app.worker.tasks import (
     JOB_REDIS_TTL_SECONDS,
@@ -42,6 +43,8 @@ NO_CACHE_DOWNLOAD_HEADERS: dict[str, str] = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     "Pragma": "no-cache",
 }
+
+_CUSTOM_REGEX_LIST_ADAPTER = TypeAdapter(list[CustomRegexRule])
 
 
 class RedactionRequestPayload(BaseModel):
@@ -132,7 +135,26 @@ async def upload_document(
         default=True,
         description="Quando True, processa a Página 1 imediatamente (`PARTIAL_REVIEW_READY`) e continua as páginas 2..N em background.",
     ),
+    custom_regexes: str | None = Form(
+        default=None,
+        description="JSON opcional contendo lista de regras regex personalizadas (`CustomRegexRule[]`).",
+    ),
 ) -> dict[str, Any]:
+    parsed_custom_rules: list[dict[str, Any]] = []
+    if custom_regexes and custom_regexes.strip():
+        try:
+            raw_json = json.loads(custom_regexes)
+            if not isinstance(raw_json, list):
+                raise ValueError("O campo custom_regexes deve ser um array JSON de regras.")
+            validated_rules = _CUSTOM_REGEX_LIST_ADAPTER.validate_python(raw_json)
+            compile_custom_regex_specs(validated_rules)
+            parsed_custom_rules = [r.model_dump(mode="json") for r in validated_rules]
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Regra regex personalizada inválida: {exc}",
+            ) from exc
+
     t_upload_start = time.perf_counter()
     raw_bytes = await file.read()
     job_uuid = uuid.uuid4()
@@ -156,6 +178,7 @@ async def upload_document(
         "processed_pages": 0,
         "pages": {},
         "occurrences": [],
+        "custom_regexes": parsed_custom_rules,
         "verbose_logs": [],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

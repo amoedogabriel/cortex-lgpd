@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AnalysisCompleteEventPayload,
+  CustomRegexRule,
   DetectedOccurrence,
   DocumentOccurrencesResponse,
   DocumentProfile,
@@ -152,10 +153,25 @@ export function appendRevisionParam(url: string, rev: number = Date.now()): stri
  */
 export async function uploadPdfDocument(
   file: File,
-  deferRemainingPages: boolean = true
+  deferRemainingPages: boolean = true,
+  customRegexes?: CustomRegexRule[]
 ): Promise<UploadDocumentResponse> {
   const formData = new FormData();
   formData.append("file", file);
+  if (customRegexes && customRegexes.length > 0) {
+    formData.append(
+      "custom_regexes",
+      JSON.stringify(
+        customRegexes.map((r) => ({
+          label: r.label,
+          pattern: r.pattern,
+          category: r.category,
+          action_mode: r.action_mode ?? null,
+          case_sensitive: Boolean(r.case_sensitive),
+        }))
+      )
+    );
+  }
 
   const response = await fetch(
     getApiUrl(`/api/v1/documents/upload?defer_remaining_pages=${deferRemainingPages}`),
@@ -193,11 +209,26 @@ export function uploadPdfDocumentWithProgress(
   callbacks?: {
     onUploadProgress?: (percent: number) => void;
     onUploadBodySent?: () => void;
-  }
+  },
+  customRegexes?: CustomRegexRule[]
 ): Promise<UploadDocumentResponse> {
   return new Promise((resolve, reject) => {
     const formData = new FormData();
     formData.append("file", file);
+    if (customRegexes && customRegexes.length > 0) {
+      formData.append(
+        "custom_regexes",
+        JSON.stringify(
+          customRegexes.map((r) => ({
+            label: r.label,
+            pattern: r.pattern,
+            category: r.category,
+            action_mode: r.action_mode ?? null,
+            case_sensitive: Boolean(r.case_sensitive),
+          }))
+        )
+      );
+    }
 
     const xhr = new XMLHttpRequest();
     xhr.open(
