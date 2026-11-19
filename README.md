@@ -2,6 +2,9 @@
 
 Plataforma web institucional da **Universidade Federal do Amazonas (UFAM)** projetada para identificação automatizada híbrida e **tarjamento físico definitivo (*true redaction*)** de dados pessoais e dados pessoais sensíveis em documentos PDF (textuais nativos, digitalizados/escaneados e híbridos), em estrita conformidade com a **Lei Geral de Proteção de Dados Pessoais (LGPD — Lei nº 13.709/2018)** e a **Lei de Acesso à Informação (LAI — Lei nº 12.527/2011)**.
 
+> [!NOTE]
+> **Cobertura por Testes Automatizados:** O projeto conta com suítes automatizadas de testes no **Backend** (`pytest`, incluindo validação de extração/OCR, NLP, destruição física de dados, fluxo de API, segurança *Zero-PII*, benchmarks de qualidade/SLA e a suíte ponta a ponta *"Padrão Ouro"*) e no **Frontend** (`TypeScript` *typecheck* e testes de navegador com `Playwright`, cobrindo caracterização de interface/estado e fluxo E2E). Consulte a [Seção 4](#4-testes-automatizados-e-benchmarks) para detalhes e comandos de execução.
+
 ---
 
 ## 1. Visão Geral da Arquitetura (Thin-Client + FastAPI/Celery/ONNX)
@@ -75,26 +78,46 @@ O motor híbrido classifica rigorosamente cada ocorrência nas **4 categorias es
 
 ---
 
-## 4. Execução da Suíte de Testes e Benchmarks Automatizados
+## 4. Testes Automatizados e Benchmarks
 
-### 4.1. Testes de Backend, Qualidade NLP, SLA de 10 Páginas e Segurança (`pytest`)
+A aplicação possui testes automatizados para validação contínua do **Backend** (`pytest`), da **Interface Web** (`Playwright` + `TypeScript`) e dos requisitos de **qualidade, segurança e desempenho**.
+
+### 4.1. Testes Automatizados de Backend, NLP, SLA e Segurança (`pytest`)
 No diretório `backend/`:
 ```bash
 python -m pytest tests/ -v -s -p no:dash
 ```
-A suíte executa:
+A suíte de backend contempla:
 - `tests/test_extraction.py`: Validação anti-malware `pikepdf`, renderização `.webp` (< 120 KB) e OCR seletivo ONNX;
-- `tests/test_pii_detector.py`: Validadores matemáticos reais (CPF, CNPJ, CNH, PIS/PASEP), supressão de processos SEI meramente organizacionais e classificação LGPD;
+- `tests/test_pii_detector.py`: Validadores matemáticos reais (CPF, CNPJ, CNH, PIS/PASEP, Título de Eleitor), supressão de processos SEI meramente organizacionais e classificação LGPD;
 - `tests/test_true_redaction.py`: Destruição física de glifos (`PDF_REDACT_TEXT_REMOVE`), queima de pixels (`PDF_REDACT_IMAGE_PIXELS`), sanitização `pikepdf` e validação cirúrgica por recorte;
 - `tests/test_api_workflow.py`: Pipeline progressivo *First-Page-First*, streaming SSE e geração do Relatório PDF Zero-PII;
 - `tests/test_quality_and_sla.py`: Benchmark sobre base sintética de 10 páginas aferindo `Precision`, `Recall`, `F1-Score`, `Mean IoU` e cumprimento dos SLAs (`Página 1 < 1,8s`, `Análise 10p < 3,0s`, `Redação + Validação 10p < 2,0s`);
-- `tests/test_security.py`: Bloqueio de `/JavaScript` e `/Launch`, isolamento de diretórios temporários e garantia de `Zero-PII` nos logs e banco.
+- `tests/test_security.py`: Bloqueio de `/JavaScript` e `/Launch`, isolamento de diretórios temporários e garantia de `Zero-PII` nos logs e banco;
+- `tests/test_gold_standard_suite.py`: Suíte *"Padrão Ouro"* ponta a ponta (sem mocks) validando tabelas estreitas multi-linha, PDFs 100% escaneados via OCR ONNX, transição dinâmica entre `BLACKOUT` e `PARTIAL_MASK` no mesmo `job_id` e auditoria *Zero-PII* do `report.pdf`.
 
-### 4.2. Testes End-to-End no Navegador (`Playwright`)
+### 4.2. Testes Automatizados de Frontend e End-to-End (`TypeScript` & `Playwright`)
 No diretório `frontend/`:
-```bash
-npx playwright test
-```
+
+1. **Verificação estática de tipos e build de produção:**
+   ```bash
+   npm run typecheck
+   npm run build
+   ```
+2. **Testes de caracterização de UI e comportamento (`e2e/ui_characterization.spec.ts`):**
+   Valida de forma determinística (via interceptação de rede) o fluxo completo de 7 etapas, alternância entre múltiplos documentos na fila, atalhos de teclado, modos `Tarjar` / `Mascarar` / `Manter`, sincronização por `group_id` e integridade das coordenadas SVG:
+   ```bash
+   npx playwright test e2e/ui_characterization.spec.ts
+   ```
+3. **Suíte End-to-End completa (`Playwright` + Backend FastAPI + Frontend Next.js):**
+   Executa o orquestrador que sobe o backend FastAPI e o frontend Next.js em produção e roda toda a suíte `Playwright` (`e2e/ui_characterization.spec.ts` e `e2e/redaction_workflow.spec.ts`):
+   ```bash
+   python e2e/run_e2e.py
+   ```
+   Ou, com os servidores já em execução:
+   ```bash
+   npm run test:e2e
+   ```
 
 ---
 
