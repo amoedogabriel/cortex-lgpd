@@ -4,18 +4,14 @@
  * Modal de Alerta Legal, Validação de Segurança e Exportação (`frontend/src/components/workspace/ExportAndReportModal.tsx`).
  *
  * Requisitos atendidos:
- * 1. Ao clicar em "Aplicar Tarjamento Definitivo", exibe o aviso legal obrigatório sobre a
- *    diferença técnica e jurídica entre **Tarjamento Definitivo** e **Anonimização** (Art. 5º, XI da LGPD)
- *    e a responsabilidade da unidade administrativa (Human-in-the-Loop).
- * 2. Após a conclusão (recebida via SSE `redaction_complete` ou resposta do endpoint `/redact`),
- *    exibe o checklist visual detalhado do `SecurityValidationResult` (confirmando destruição física
- *    do texto, queima dos pixels, limpeza de metadados `/Info` e XMP e integridade do arquivo).
- * 3. Fornece os botões de download com cache-busting para o **PDF Tarjado Final** e o **Relatório de Processamento (PDF Zero-PII)**,
- *    além do botão **"Voltar e Editar Modos"** para re-gerar livremente alternando entre Tarja Preta e Mascaramento Parcial.
- * 4. Construído sem `backdrop-blur` nem sombras GPU pesadas (compatível com estações legadas).
+ * 1. Exibe o aviso legal obrigatório (Art. 5º, XI da LGPD e LAI) antes de aplicar o tarjamento físico definitivo.
+ * 2. Após a conclusão, exibe o checklist detalhado do SecurityValidationResult, hashes SHA-256 e downloads.
+ * 3. Acessibilidade WCAG 2.2 AA completa: Escape para fechar, focus trap, foco inicial, restauração de foco e scroll lock.
+ * 4. Construído sem backdrop-blur nem sombras pesadas em GPU (compatível com estações legadas).
+ * 5. Microcopy limpa, sem crases literais de Markdown expostas no texto.
  */
 
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -27,6 +23,7 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
+import { Badge, Button, buttonVariants } from "@/components/ui";
 import type { SecurityValidationResult } from "@/types/document";
 
 export interface ExportAndReportModalProps {
@@ -44,6 +41,15 @@ export interface ExportAndReportModalProps {
   onConfirmAndApplyRedaction: (disclaimerAccepted: boolean) => Promise<void>;
 }
 
+const FOCUSABLE_SELECTOR = [
+  'a[href]:not([tabindex="-1"])',
+  'button:not([disabled]):not([tabindex="-1"])',
+  'input:not([disabled]):not([tabindex="-1"])',
+  'select:not([disabled]):not([tabindex="-1"])',
+  'textarea:not([disabled]):not([tabindex="-1"])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(", ");
+
 export function ExportAndReportModal({
   isOpen,
   isApplyingRedaction,
@@ -59,6 +65,68 @@ export function ExportAndReportModal({
   onConfirmAndApplyRedaction,
 }: ExportAndReportModalProps) {
   const [disclaimerChecked, setDisclaimerChecked] = useState<boolean>(true);
+  const dialogPanelRef = useRef<HTMLDivElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  // Gestão de foco WCAG 2.2 AA (foco inicial, focus trap, Escape e restauração de foco) + scroll lock
+  useEffect(() => {
+    if (!isOpen) return;
+
+    previousFocusRef.current = document.activeElement as HTMLElement | null;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    const panel = dialogPanelRef.current;
+    if (panel) {
+      const focusables = panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      if (focusables.length > 0) {
+        focusables[0].focus();
+      } else {
+        panel.focus();
+      }
+    }
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (!isApplyingRedaction) {
+          e.preventDefault();
+          onClose();
+        }
+        return;
+      }
+
+      if (e.key === "Tab" && dialogPanelRef.current) {
+        const focusables = Array.from(
+          dialogPanelRef.current.querySelectorAll<HTMLElement>(
+            FOCUSABLE_SELECTOR
+          )
+        ).filter((el) => el.offsetParent !== null);
+
+        if (focusables.length === 0) return;
+
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+
+        if (e.shiftKey) {
+          if (!active || active === first || !dialogPanelRef.current.contains(active)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (active === last || !dialogPanelRef.current.contains(active)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = prevOverflow;
+      previousFocusRef.current?.focus();
+    };
+  }, [isOpen, isApplyingRedaction, onClose]);
 
   if (!isOpen) return null;
 
@@ -73,14 +141,21 @@ export function ExportAndReportModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/75 p-4"
       data-testid="export-and-report-modal"
     >
-      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white text-slate-900 shadow-[0_20px_50px_rgba(15,23,42,0.28)]">
-        {/* Cabeçalho Institucional Limpo UFAM */}
-        <div className="flex shrink-0 items-center justify-between border-b border-emerald-950/30 bg-emerald-900 px-5 py-4 text-white">
-          <div className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/20 bg-white/10">
+      <div
+        ref={dialogPanelRef}
+        tabIndex={-1}
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-line bg-surface-card text-ink-primary shadow-md focus:outline-none"
+      >
+        {/* Cabeçalho Institucional UFAM */}
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-emerald-950/30 bg-brand-header px-5 py-3.5 text-white">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/20 bg-white/10">
               <Shield className="h-4 w-4" aria-hidden="true" />
             </span>
-            <h2 id="modal-title-lgpd" className="text-sm font-semibold sm:text-base">
+            <h2
+              id="modal-title-lgpd"
+              className="text-sm font-semibold leading-snug sm:text-[15px]"
+            >
               {isRedactionComplete
                 ? "Validação Cirúrgica Concluída e Exportação de Documentos"
                 : "Termo de Ciência Institucional e Confirmação de Tarjamento Definitivo"}
@@ -92,7 +167,7 @@ export function ExportAndReportModal({
             disabled={isApplyingRedaction}
             onClick={onClose}
             aria-label="Fechar modal"
-            className="rounded-lg border border-white/20 bg-white/10 p-1.5 text-white transition-colors duration-200 hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2"
+            className="rounded-lg border border-white/20 bg-white/10 p-1.5 text-white transition-colors duration-150 hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-brand-header"
             data-testid="close-export-modal-btn"
           >
             <X className="h-4 w-4" aria-hidden="true" />
@@ -100,32 +175,36 @@ export function ExportAndReportModal({
         </div>
 
         {/* Corpo do Modal com rolagem interna segura */}
-        <div id="modal-desc-lgpd" className="space-y-4 overflow-y-auto p-6 text-xs">
+        <div
+          id="modal-desc-lgpd"
+          className="space-y-4 overflow-y-auto p-5 text-xs sm:p-6"
+        >
           {!isRedactionComplete ? (
             <>
-              {/* Resumo Quantitativo Pré-Aplicação em grid único com divide-x */}
-              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                <p className="border-b border-slate-100 bg-slate-50/70 px-4 py-2.5 font-semibold text-slate-900">
-                  Resumo das Marcações Selecionadas para Destruição Física Irreversível:
+              {/* Resumo Quantitativo Pré-Aplicação */}
+              <div className="overflow-hidden rounded-xl border border-line-subtle bg-surface-card">
+                <p className="border-b border-line-subtle bg-surface-muted px-4 py-2 font-semibold text-ink-primary">
+                  Resumo das Marcações Selecionadas para Destruição Física
+                  Irreversível
                 </p>
-                <div className="grid grid-cols-3 divide-x divide-slate-100 text-center">
+                <div className="grid grid-cols-3 divide-x divide-line-subtle text-center">
                   <div className="p-3.5">
-                    <span className="block font-mono text-xl font-bold tabular-nums text-emerald-800">
+                    <span className="block font-mono text-xl font-bold tabular-nums text-brand-primary">
                       {selectedAutoCount}
                     </span>
-                    <span className="mt-0.5 block text-[11px] text-slate-600">
+                    <span className="mt-0.5 block text-[11px] text-ink-muted">
                       Ocorrências Automáticas
                     </span>
                   </div>
                   <div className="p-3.5">
-                    <span className="block font-mono text-xl font-bold tabular-nums text-slate-900">
+                    <span className="block font-mono text-xl font-bold tabular-nums text-ink-primary">
                       {manualBoxesCount}
                     </span>
-                    <span className="mt-0.5 block text-[11px] text-slate-600">
+                    <span className="mt-0.5 block text-[11px] text-ink-muted">
                       Tarjas Manuais
                     </span>
                   </div>
-                  <div className="bg-red-50/40 p-3.5">
+                  <div className="bg-red-50/50 p-3.5">
                     <span className="block font-mono text-xl font-bold tabular-nums text-red-800">
                       {totalRedactions}
                     </span>
@@ -136,40 +215,62 @@ export function ExportAndReportModal({
                 </div>
               </div>
 
-              {/* Aviso Legal Obrigatório: Distinção entre Tarjamento e Anonimização (Art. 5º, XI, LGPD) */}
-              <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-amber-900">
+              {/* Aviso Legal Obrigatório: Art. 5º, XI, LGPD e LAI */}
+              <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-4 text-amber-950">
                 <div className="flex items-start gap-2.5">
                   <AlertTriangle
                     className="mt-0.5 h-5 w-5 shrink-0 text-amber-700"
                     aria-hidden="true"
                   />
-                  <div className="space-y-1.5 leading-relaxed">
+                  <div className="space-y-1.5 leading-relaxed text-amber-900">
                     <p className="font-semibold text-amber-950">
-                      Aviso Técnico e Jurídico Obrigatório (Art. 5º, XI, Lei nº 13.709/2018 — LGPD e Lei nº 12.527/2011 — LAI):
+                      Aviso Técnico e Jurídico Obrigatório (Art. 5º, XI, Lei nº
+                      13.709/2018 — LGPD e Lei nº 12.527/2011 — LAI):
                     </p>
                     <p>
-                      1. <strong className="font-semibold text-amber-950">Distinção entre Tarjamento e Anonimização:</strong> O{" "}
-                      <em>tarjamento definitivo (true redaction)</em> remove fisicamente os glifos de texto, vetores e pixels nas coordenadas selecionadas, mas{" "}
-                      <strong className="font-semibold text-amber-950">não garante por si só a anonimização integral do documento</strong> nos termos do Art. 5º, inciso XI, da LGPD, haja vista a possibilidade de identificação indireta por meio do contexto narrativo remanescente.
+                      1.{" "}
+                      <strong className="font-semibold text-amber-950">
+                        Distinção entre Tarjamento e Anonimização:
+                      </strong>{" "}
+                      O <em>tarjamento definitivo (true redaction)</em> remove
+                      fisicamente os glifos de texto, vetores e pixels nas
+                      coordenadas selecionadas, mas{" "}
+                      <strong className="font-semibold text-amber-950">
+                        não garante por si só a anonimização integral do
+                        documento
+                      </strong>{" "}
+                      nos termos do Art. 5º, inciso XI, da LGPD, haja vista a
+                      possibilidade de identificação indireta por meio do
+                      contexto narrativo remanescente.
                     </p>
                     <p>
-                      2. <strong className="font-semibold text-amber-950">Responsabilidade Administrativa (Human-in-the-Loop):</strong> Este sistema constitui instrumento técnico de auxílio e não substitui a conferência visual e o juízo administrativo da unidade responsável da UFAM antes da publicação ou disponibilização externa do documento.
+                      2.{" "}
+                      <strong className="font-semibold text-amber-950">
+                        Responsabilidade Administrativa (Human-in-the-Loop):
+                      </strong>{" "}
+                      Este sistema constitui instrumento técnico de auxílio e
+                      não substitui a conferência visual e o juízo
+                      administrativo da unidade responsável da UFAM antes da
+                      publicação ou disponibilização externa do documento.
                     </p>
                   </div>
                 </div>
               </div>
 
               {/* Checkbox de Confirmação Expressa */}
-              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-300 bg-white p-4 font-medium leading-relaxed text-slate-900 transition-colors duration-200 hover:border-emerald-700">
+              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-line bg-surface-card p-3.5 font-medium leading-relaxed text-ink-primary transition-colors duration-150 hover:border-brand-primary">
                 <input
                   type="checkbox"
                   checked={disclaimerChecked}
                   onChange={(e) => setDisclaimerChecked(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded accent-emerald-800"
+                  className="mt-0.5 h-4 w-4 rounded accent-brand-primary"
                   data-testid="modal-disclaimer-checkbox"
                 />
                 <span>
-                  Declaro que revisei as páginas do documento e estou ciente da distinção técnica entre tarjamento seletivo e anonimização (Art. 5º, XI, LGPD). Autorizo a aplicação do tarjamento físico irreversível.
+                  Declaro que revisei as páginas do documento e estou ciente da
+                  distinção técnica entre tarjamento seletivo e anonimização
+                  (Art. 5º, XI, LGPD). Autorizo a aplicação do tarjamento físico
+                  irreversível.
                 </span>
               </label>
 
@@ -182,22 +283,24 @@ export function ExportAndReportModal({
                 </div>
               )}
 
-              {/* Botões de Ação do Modal 1 */}
-              <div className="flex flex-wrap items-center justify-end gap-2.5 border-t border-slate-200 pt-4">
-                <button
-                  type="button"
+              {/* Rodapé do Modal 1 */}
+              <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line-subtle pt-4">
+                <Button
+                  variant="secondary"
+                  size="md"
                   disabled={isApplyingRedaction}
                   onClick={onClose}
-                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 font-medium text-slate-700 transition-colors duration-200 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2"
                 >
                   Voltar à Revisão
-                </button>
+                </Button>
 
-                <button
-                  type="button"
+                <Button
+                  variant="danger"
+                  size="md"
                   disabled={!disclaimerChecked || isApplyingRedaction}
-                  onClick={() => void onConfirmAndApplyRedaction(disclaimerChecked)}
-                  className="inline-flex items-center gap-2 rounded-lg bg-red-800 px-4 py-2 font-semibold text-white shadow-sm transition-colors duration-200 hover:bg-red-900 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2"
+                  onClick={() =>
+                    void onConfirmAndApplyRedaction(disclaimerChecked)
+                  }
                   data-testid="confirm-apply-redaction-btn"
                 >
                   <Lock className="h-4 w-4" aria-hidden="true" />
@@ -206,96 +309,125 @@ export function ExportAndReportModal({
                       ? "Destruindo Fluxos de Texto, Pixels e Sanitizando..."
                       : "Confirmar e Executar Tarjamento Definitivo"}
                   </span>
-                </button>
+                </Button>
               </div>
             </>
           ) : (
             /* Modal 2: Validação Cirúrgica e Exportação */
-            <div className="space-y-4" data-testid="validation-and-export-panel">
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-950">
+            <div
+              className="space-y-4"
+              data-testid="validation-and-export-panel"
+            >
+              <div className="rounded-xl border border-brand-border bg-brand-subtle p-4 text-brand-ink">
                 <div className="flex items-start gap-3">
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-800 text-white">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-primary text-white">
                     <ShieldCheck className="h-4 w-4" aria-hidden="true" />
                   </span>
                   <div>
-                    <p className="text-sm font-semibold text-emerald-950">
-                      Tarjamento Definitivo e Validação Cirúrgica de Segurança Aprovados!
+                    <p className="text-sm font-semibold text-ink-primary">
+                      Tarjamento Definitivo e Validação Cirúrgica de Segurança
+                      Aprovados!
                     </p>
-                    <p className="mt-1 leading-relaxed text-emerald-900">
-                      O documento original foi preservado intacto e um novo arquivo PDF sanitizado foi gerado e inspecionado. Você pode baixar os arquivos ou voltar para ajustar os modos e re-gerar quantas vezes precisar.
+                    <p className="mt-1 leading-relaxed text-brand-ink">
+                      O documento original foi preservado intacto e um novo
+                      arquivo PDF sanitizado foi gerado e inspecionado. Você
+                      pode baixar os arquivos ou voltar para ajustar os modos e
+                      re-gerar quantas vezes precisar.
                     </p>
                   </div>
                 </div>
               </div>
 
-              {/* Checklist Visual das 4 Verificações de Segurança Pós-Tarjamento em lista única */}
-              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                <p className="border-b border-slate-100 px-4 py-3 font-semibold text-slate-900">
-                  Checklist de Validação Pós-Tarjamento (`SecurityValidationResult`):
+              {/* Checklist Visual das 4 Verificações Pós-Tarjamento (sem crases literais) */}
+              <div className="overflow-hidden rounded-xl border border-line-subtle bg-surface-card">
+                <p className="border-b border-line-subtle bg-surface-muted px-4 py-2.5 font-semibold text-ink-primary">
+                  Checklist de Validação Pós-Tarjamento
                 </p>
 
-                <ul className="divide-y divide-slate-100">
+                <ul className="divide-y divide-line-subtle">
                   <li className="flex items-start gap-2.5 px-4 py-2.5">
                     <CheckCircle2
-                      className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700"
+                      className="mt-0.5 h-4 w-4 shrink-0 text-brand-primary"
                       aria-hidden="true"
                     />
-                    <span className="leading-relaxed text-slate-700">
-                      <strong className="font-semibold text-slate-900">
-                        1. Destruição da Camada de Texto (`PDF_REDACT_TEXT_REMOVE`):
+                    <span className="leading-relaxed text-ink-secondary">
+                      <strong className="font-semibold text-ink-primary">
+                        1. Destruição da Camada de Texto (
+                        <code className="rounded bg-surface-subtle px-1 py-0.5 font-mono text-[11px] font-semibold text-ink-primary">
+                          PDF_REDACT_TEXT_REMOVE
+                        </code>
+                        ):
                       </strong>{" "}
-                      Glifos originais removidos fisicamente; impossível recuperar dados via copiar/colar ou pesquisa textual.
+                      Glifos originais removidos fisicamente; impossível
+                      recuperar dados via copiar/colar ou pesquisa textual.
                     </span>
                   </li>
                   <li className="flex items-start gap-2.5 px-4 py-2.5">
                     <CheckCircle2
-                      className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700"
+                      className="mt-0.5 h-4 w-4 shrink-0 text-brand-primary"
                       aria-hidden="true"
                     />
-                    <span className="leading-relaxed text-slate-700">
-                      <strong className="font-semibold text-slate-900">
-                        2. Queima de Pixels / Substituição Física (`PDF_REDACT_IMAGE_PIXELS`):
+                    <span className="leading-relaxed text-ink-secondary">
+                      <strong className="font-semibold text-ink-primary">
+                        2. Queima de Pixels / Substituição Física (
+                        <code className="rounded bg-surface-subtle px-1 py-0.5 font-mono text-[11px] font-semibold text-ink-primary">
+                          PDF_REDACT_IMAGE_PIXELS
+                        </code>
+                        ):
                       </strong>{" "}
-                      Recorte inspecionado a 150 DPI confirmando cobertura preta sólida (<code className="font-mono">#000000</code>) ou mascaramento parcial físico.
+                      Recorte inspecionado a 150 DPI confirmando cobertura preta
+                      sólida (
+                      <code className="font-mono text-[11px]">#000000</code>) ou
+                      mascaramento parcial físico.
                     </span>
                   </li>
                   <li className="flex items-start gap-2.5 px-4 py-2.5">
                     <CheckCircle2
-                      className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700"
+                      className="mt-0.5 h-4 w-4 shrink-0 text-brand-primary"
                       aria-hidden="true"
                     />
-                    <span className="leading-relaxed text-slate-700">
-                      <strong className="font-semibold text-slate-900">
-                        3. Sanitização Estrutural (`pikepdf`):
+                    <span className="leading-relaxed text-ink-secondary">
+                      <strong className="font-semibold text-ink-primary">
+                        3. Sanitização Estrutural (
+                        <code className="rounded bg-surface-subtle px-1 py-0.5 font-mono text-[11px] font-semibold text-ink-primary">
+                          pikepdf
+                        </code>
+                        ):
                       </strong>{" "}
-                      Metadados <code className="font-mono">/Info</code>, fluxos XML XMP <code className="font-mono">/Metadata</code>, camadas ocultas <code className="font-mono">/OCProperties</code> e objetos órfãos expurgados.
+                      Metadados <code className="font-mono">/Info</code>, fluxos
+                      XML XMP <code className="font-mono">/Metadata</code>,
+                      camadas ocultas{" "}
+                      <code className="font-mono">/OCProperties</code> e objetos
+                      órfãos expurgados.
                     </span>
                   </li>
                   <li className="flex items-start gap-2.5 px-4 py-2.5">
                     <CheckCircle2
-                      className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700"
+                      className="mt-0.5 h-4 w-4 shrink-0 text-brand-primary"
                       aria-hidden="true"
                     />
-                    <span className="leading-relaxed text-slate-700">
-                      <strong className="font-semibold text-slate-900">
-                        4. Integridade e Rastreabilidade Criptográfica (Zero-PII):
+                    <span className="leading-relaxed text-ink-secondary">
+                      <strong className="font-semibold text-ink-primary">
+                        4. Integridade e Rastreabilidade Criptográfica
+                        (Zero-PII):
                       </strong>{" "}
-                      Arquivo PDF íntegro e hashes SHA-256 registrados sem armazenamento de dados pessoais.
+                      Arquivo PDF íntegro e hashes SHA-256 registrados sem
+                      armazenamento de dados pessoais.
                     </span>
                   </li>
                 </ul>
               </div>
 
               {auditLog && (
-                <div className="grid grid-cols-1 gap-2.5 rounded-xl border border-slate-200 bg-slate-50 p-4 text-[11px] sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-2.5 rounded-xl border border-line-subtle bg-surface-muted p-4 text-[11px] sm:grid-cols-2">
                   <div>
-                    <span className="font-medium text-slate-600">
+                    <span className="font-medium text-ink-muted">
                       Total de Tarjas Aplicadas:
                     </span>{" "}
-                    <strong className="font-mono font-semibold tabular-nums text-slate-900">
+                    <strong className="font-mono font-semibold tabular-nums text-ink-primary">
                       {auditLog.total_redactions_applied}
                     </strong>{" "}
-                    <span className="text-slate-600">
+                    <span className="text-ink-muted">
                       (Páginas:{" "}
                       <span className="font-mono tabular-nums">
                         {auditLog.affected_pages.join(", ") || "Nenhuma"}
@@ -303,70 +435,58 @@ export function ExportAndReportModal({
                       )
                     </span>
                   </div>
-                  <div>
-                    <span className="font-medium text-slate-600">
+                  <div className="flex items-center gap-1.5 sm:justify-end">
+                    <span className="font-medium text-ink-muted">
                       Status da Validação Cirúrgica:
-                    </span>{" "}
-                    <strong className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-800">
-                      {auditLog.security_validation_passed ? "APROVADO (100%)" : "VERIFICAR"}
-                    </strong>
+                    </span>
+                    <Badge
+                      variant={
+                        auditLog.security_validation_passed
+                          ? "brand"
+                          : "warning"
+                      }
+                    >
+                      {auditLog.security_validation_passed
+                        ? "APROVADO (100%)"
+                        : "VERIFICAR"}
+                    </Badge>
                   </div>
                   <div className="sm:col-span-2">
-                    <span className="font-medium text-slate-600">
+                    <span className="font-medium text-ink-muted">
                       SHA-256 Documento Original:
                     </span>{" "}
-                    <code className="break-all rounded bg-white px-1.5 py-0.5 font-mono text-xs text-slate-800">
+                    <code className="break-all rounded border border-line-subtle bg-surface-card px-1.5 py-0.5 font-mono text-[11px] text-ink-primary">
                       {auditLog.original_document_sha256}
                     </code>
                   </div>
                   <div className="sm:col-span-2">
-                    <span className="font-medium text-slate-600">
+                    <span className="font-medium text-ink-muted">
                       SHA-256 Documento Tarjado Final:
                     </span>{" "}
-                    <code className="break-all rounded bg-white px-1.5 py-0.5 font-mono text-xs text-slate-800">
+                    <code className="break-all rounded border border-line-subtle bg-surface-card px-1.5 py-0.5 font-mono text-[11px] text-ink-primary">
                       {auditLog.redacted_document_sha256}
                     </code>
                   </div>
                 </div>
               )}
 
-              {/* Rodapé em Linha Única Distribuída */}
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (onBackToEditModes) {
-                        onBackToEditModes();
-                      } else {
-                        onClose();
-                      }
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 font-semibold text-slate-700 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2"
-                    data-testid="back-to-edit-modes-btn"
-                  >
-                    <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-                    <span>Voltar e Editar Modos</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={onClose}
-                    className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 font-medium text-slate-600 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2"
-                  >
-                    Fechar Janela
-                  </button>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
+              {/* Ações de Download em Destaque + Navegação Secundária Organizada */}
+              <div className="space-y-3 border-t border-line-subtle pt-4">
+                <div className="flex flex-wrap items-center justify-end gap-2">
                   {downloadReportUrl && (
                     <a
                       href={downloadReportUrl}
                       download
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 font-semibold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2"
+                      className={buttonVariants({
+                        variant: "secondary",
+                        size: "md",
+                      })}
                       data-testid="download-report-pdf-link"
                     >
-                      <FileCheck className="h-4 w-4 text-emerald-700" aria-hidden="true" />
+                      <FileCheck
+                        className="h-4 w-4 text-brand-primary"
+                        aria-hidden="true"
+                      />
                       <span>Baixar Relatório de Processamento (PDF)</span>
                     </a>
                   )}
@@ -375,13 +495,38 @@ export function ExportAndReportModal({
                     <a
                       href={downloadPdfUrl}
                       download
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-800 px-4 py-2 font-semibold text-white shadow-sm transition-colors duration-200 hover:bg-emerald-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2"
+                      className={buttonVariants({
+                        variant: "primary",
+                        size: "md",
+                      })}
                       data-testid="download-redacted-pdf-link"
                     >
                       <Download className="h-4 w-4" aria-hidden="true" />
                       <span>Baixar PDF Tarjado Final</span>
                     </a>
                   )}
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line-subtle pt-3">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      if (onBackToEditModes) {
+                        onBackToEditModes();
+                      } else {
+                        onClose();
+                      }
+                    }}
+                    data-testid="back-to-edit-modes-btn"
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Voltar e Editar Modos</span>
+                  </Button>
+
+                  <Button variant="ghost" size="sm" onClick={onClose}>
+                    Fechar Janela
+                  </Button>
                 </div>
               </div>
             </div>

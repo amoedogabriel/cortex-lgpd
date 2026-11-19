@@ -13,6 +13,8 @@ import {
   RotateCcw,
   Trash2,
 } from "lucide-react";
+import { Badge, Button, buttonVariants } from "@/components/ui";
+import type { BadgeVariant } from "@/components/ui";
 import { cn } from "@/lib/utils";
 import { PIPELINE_STAGE_LABELS } from "@/services/api";
 import type {
@@ -24,6 +26,7 @@ import type {
 export interface DocumentProgressCardProps {
   item: DocumentQueueItemState;
   isActive: boolean;
+  compact?: boolean;
   onSelectForReview: (clientId: string) => void;
   onRetry: (clientId: string) => void;
   onRemove: (clientId: string) => void;
@@ -48,24 +51,25 @@ export function formatFileSize(bytes: number): string {
   return `${mb.toFixed(2)} MB`;
 }
 
-function getBadgeClasses(status: DocumentBadgeStatus): string {
+function getBadgeVariant(status: DocumentBadgeStatus): BadgeVariant {
   switch (status) {
     case "Aguardando":
-      return "bg-[#f1f5f9] text-[#334155]";
+      return "neutral";
     case "Carregando":
-      return "bg-[#eff6ff] text-[#1d4ed8]";
+      return "info";
     case "Processando":
-      return "bg-[#fef3c7] text-[#92400e]";
+      return "warning";
     case "Concluído":
-      return "bg-[#d1fae5] text-[#065f46]";
+      return "brand";
     case "Erro":
-      return "bg-[#fef2f2] text-[#b91c1c]";
+      return "danger";
   }
 }
 
 export function DocumentProgressCard({
   item,
   isActive,
+  compact = false,
   onSelectForReview,
   onRetry,
   onRemove,
@@ -100,62 +104,64 @@ export function DocumentProgressCard({
       : `${clampedPercent}%`
     : "Processamento em andamento...";
 
+  // Progressive disclosure: oculta mini-pipeline redundante quando já pronto no workspace
+  const showMiniPipeline = !(compact && (isWaitingHumanReview || isDone));
+
   return (
     <article
       aria-label={`Progresso do documento ${item.fileName}`}
       aria-busy={isInFlight && !isWaitingHumanReview}
       className={cn(
-        "rounded-[12px] border bg-white px-5 py-4 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all duration-200",
+        "rounded-xl border bg-surface-card shadow-xs transition-colors duration-150",
+        compact ? "px-4 py-3" : "px-4 py-3.5 sm:px-5",
         isError
-          ? "border-[#fecaca] bg-[#fef2f2]/40"
+          ? "border-red-200 bg-red-50/40"
           : isActive
-          ? "border-[#0e5a43]"
-          : "border-[#e2e8f0] hover:border-[#cbd5e1]"
+          ? "border-brand-primary"
+          : "border-line-subtle hover:border-line"
       )}
     >
-      {/* Linha 1: Ícone + Nome + Tamanho + Badges Pastéis + SHA-256 + Ações */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span
-            className={cn(
-              "flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] border",
-              isError
-                ? "border-[#fecaca] bg-[#fef2f2] text-[#b91c1c]"
-                : "border-[#e2e8f0] bg-[#f8fafc] text-[#0e5a43]"
-            )}
-          >
-            <FileText className="h-4 w-4" aria-hidden="true" />
-          </span>
+      {/* Linha 1: Identificação do arquivo + Status + Ações */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-2.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 sm:flex-1">
+          <div className="flex min-w-0 max-w-full items-center gap-2">
+            <span
+              className={cn(
+                "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border",
+                isError
+                  ? "border-red-200 bg-red-50 text-red-700"
+                  : "border-line-subtle bg-surface-muted text-brand-primary"
+              )}
+            >
+              <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+            </span>
 
-          <span
-            className="truncate text-[15px] font-semibold text-[#0f172a]"
-            title={item.fileName}
-          >
-            {item.fileName}
-          </span>
+            <span
+              className="min-w-0 truncate text-sm font-semibold text-ink-primary sm:max-w-[340px]"
+              title={item.fileName}
+            >
+              {item.fileName}
+            </span>
+          </div>
 
-          <span className="shrink-0 font-mono text-[12px] tabular-nums text-[#475569]">
+          <span className="shrink-0 font-mono text-[11px] tabular-nums text-ink-muted">
             {formatFileSize(item.fileSizeBytes)}
           </span>
-        </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <span
-            className={cn(
-              "inline-flex h-[22px] items-center gap-1 rounded-full px-2.5 text-[12px] font-semibold",
-              getBadgeClasses(item.badgeStatus)
-            )}
-          >
+          <Badge variant={getBadgeVariant(item.badgeStatus)}>
             {isDone && <CheckCircle2 className="h-3 w-3" aria-hidden="true" />}
             {isError && <AlertCircle className="h-3 w-3" aria-hidden="true" />}
             {item.badgeStatus === "Aguardando" && (
               <Clock className="h-3 w-3" aria-hidden="true" />
             )}
             {isInFlight && (
-              <Loader2 className="h-3 w-3 motion-safe:animate-spin" aria-hidden="true" />
+              <Loader2
+                className="h-3 w-3 motion-safe:animate-spin"
+                aria-hidden="true"
+              />
             )}
             <span>{item.badgeStatus}</span>
-          </span>
+          </Badge>
 
           {item.isReadyForReview && !isError && (
             <button
@@ -163,10 +169,10 @@ export function DocumentProgressCard({
               onClick={() => onSelectForReview(item.clientId)}
               aria-pressed={isActive}
               className={cn(
-                "inline-flex items-center gap-1 text-[12px] font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-2",
+                "inline-flex items-center gap-1 text-xs font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-focus focus-visible:ring-offset-2",
                 isActive
-                  ? "h-[22px] rounded-full bg-[#d1fae5] px-2.5 text-[#065f46]"
-                  : "h-[26px] rounded-[8px] border border-[#cbd5e1] bg-white px-2.5 text-[#0f172a] hover:bg-[#f1f5f9]"
+                  ? "h-6 rounded-full border border-brand-border bg-brand-subtle px-2.5 text-brand-ink"
+                  : "h-7 rounded-lg border border-line bg-surface-card px-2.5 text-ink-primary hover:bg-surface-subtle"
               )}
             >
               <Eye className="h-3 w-3" aria-hidden="true" />
@@ -175,9 +181,12 @@ export function DocumentProgressCard({
           )}
         </div>
 
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {isActive && item.originalSha256 && (
-            <span className="font-mono text-[12px] tabular-nums text-[#475569]">
+            <span
+              className="rounded-md bg-surface-subtle px-2 py-0.5 font-mono text-[11px] tabular-nums text-ink-secondary"
+              title={`SHA-256 original completo: ${item.originalSha256}`}
+            >
               SHA-256 Orig: {item.originalSha256.slice(0, 16)}...
             </span>
           )}
@@ -186,7 +195,7 @@ export function DocumentProgressCard({
             <a
               href={item.downloadPdfUrl}
               download
-              className="inline-flex h-[26px] items-center gap-1 rounded-[8px] border border-[#0e5a43] bg-[#0e5a43] px-2.5 text-[12px] font-semibold text-white transition-all duration-200 hover:bg-[#0b4a37] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-2"
+              className={buttonVariants({ variant: "primary", size: "xs" })}
             >
               <Download className="h-3 w-3" aria-hidden="true" />
               <span>PDF</span>
@@ -197,105 +206,118 @@ export function DocumentProgressCard({
             <a
               href={item.downloadReportUrl}
               download
-              className="inline-flex h-[26px] items-center gap-1 rounded-[8px] border border-[#cbd5e1] bg-white px-2.5 text-[12px] font-semibold text-[#0f172a] transition-all duration-200 hover:bg-[#f1f5f9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-2"
+              className={buttonVariants({ variant: "secondary", size: "xs" })}
             >
-              <FileCheck className="h-3 w-3 text-[#0e5a43]" aria-hidden="true" />
+              <FileCheck
+                className="h-3 w-3 text-brand-primary"
+                aria-hidden="true"
+              />
               <span>Relatório</span>
             </a>
           )}
 
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={() => onRemove(item.clientId)}
             title="Remover documento da lista"
             aria-label={`Remover ${item.fileName}`}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-[8px] border border-[#e2e8f0] bg-white text-[#475569] transition-all duration-200 hover:border-[#fecaca] hover:bg-[#fef2f2] hover:text-[#991b1b] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-2"
+            className="border border-line-subtle bg-surface-card text-ink-muted hover:border-red-200 hover:bg-red-50 hover:text-red-800"
           >
             <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-          </button>
+          </Button>
         </div>
       </div>
 
-      {/* Linha 2: Barra de Progresso Fina + Texto Compacto de Etapa/Páginas */}
-      <div className="mt-3 flex flex-wrap items-center gap-3">
+      {/* Linha 2: Barra de Progresso Fina + Resumo Honesto de Etapa/Páginas */}
+      <div className="mt-2.5 flex flex-wrap items-center gap-3">
         <div
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-valuenow={isDeterminate && clampedPercent !== null ? clampedPercent : undefined}
+          aria-valuenow={
+            isDeterminate && clampedPercent !== null ? clampedPercent : undefined
+          }
           aria-valuetext={activeStageText}
-          className="h-[6px] min-w-[140px] flex-1 overflow-hidden rounded-full bg-[#e2e8f0]"
+          className="h-1.5 min-w-[120px] flex-1 overflow-hidden rounded-full bg-surface-canvas"
         >
           {isError ? (
-            <div className="h-full w-full rounded-full bg-[#dc2626]" />
+            <div className="h-full w-full rounded-full bg-red-600" />
           ) : isDeterminate && clampedPercent !== null ? (
             <div
-              className="h-full rounded-full bg-[#0e5a43] transition-[width] duration-200"
+              className="h-full rounded-full bg-brand-primary transition-[width] duration-150"
               style={{ width: `${clampedPercent}%` }}
             />
           ) : (
-            <div className="progress-indeterminate-bar h-full rounded-full bg-[#0e5a43]" />
+            <div className="progress-indeterminate-bar h-full rounded-full bg-brand-primary" />
           )}
         </div>
 
         <div
-          className="flex flex-wrap items-center gap-1.5 text-[12px] text-[#475569]"
+          className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-muted"
           aria-live="polite"
         >
           <span
             className={cn(
               "font-medium",
-              isError ? "text-[#b91c1c]" : isDone ? "text-[#065f46]" : "text-[#475569]"
+              isError
+                ? "text-red-800"
+                : isDone
+                ? "text-brand-ink"
+                : "text-ink-secondary"
             )}
           >
             Etapa {item.stageNumber}/6: {activeStageText}
           </span>
           <span aria-hidden="true">•</span>
-          <span className="font-mono tabular-nums text-[#475569]">
+          <span className="font-mono tabular-nums text-ink-muted">
             {progressSummaryText}
           </span>
         </div>
       </div>
 
-      {/* Mini-Pipeline Ultracompacta das 6 Etapas Reais */}
-      <ol className="mt-2.5 grid grid-cols-3 gap-1 sm:grid-cols-6">
-        {STAGE_STEPS.map((st) => {
-          const completed = !isError && (isDone || st.num < item.stageNumber);
-          const current = !isError && !isDone && st.num === item.stageNumber;
-          return (
-            <li
-              key={st.num}
-              aria-current={current ? "step" : undefined}
-              className={cn(
-                "truncate rounded-[6px] px-1.5 py-0.5 text-center text-[10px] transition-colors duration-200",
-                completed && "bg-[#ecfdf5] font-medium text-[#065f46]",
-                current && "bg-[#fef3c7] font-semibold text-[#451a03]",
-                !completed && !current && "bg-[#f8fafc] text-[#475569]"
-              )}
-            >
-              {st.num}. {st.short}
-            </li>
-          );
-        })}
-      </ol>
+      {/* Mini-Pipeline das 6 Etapas (exibida durante processamento ativo) */}
+      {showMiniPipeline && (
+        <ol className="mt-2 grid grid-cols-3 gap-1 sm:grid-cols-6">
+          {STAGE_STEPS.map((st) => {
+            const completed = !isError && (isDone || st.num < item.stageNumber);
+            const current = !isError && !isDone && st.num === item.stageNumber;
+            return (
+              <li
+                key={st.num}
+                aria-current={current ? "step" : undefined}
+                className={cn(
+                  "truncate rounded-md px-1.5 py-0.5 text-center text-[10px] transition-colors duration-150",
+                  completed && "bg-brand-subtle font-medium text-brand-ink",
+                  current && "bg-amber-100 font-semibold text-amber-950",
+                  !completed && !current && "bg-surface-muted text-ink-muted"
+                )}
+              >
+                {st.num}. {st.short}
+              </li>
+            );
+          })}
+        </ol>
+      )}
 
       {/* Erro claro + Botão Tentar Novamente */}
       {isError && (
         <div
           role="alert"
-          className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-[8px] border border-[#fecaca] bg-[#fef2f2] px-3 py-2 text-[12px] text-[#991b1b]"
+          className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-900"
         >
           <span className="min-w-0 flex-1">
-            {item.errorMessage || "Não foi possível concluir o processamento deste documento."}
+            {item.errorMessage ||
+              "Não foi possível concluir o processamento deste documento."}
           </span>
-          <button
-            type="button"
+          <Button
+            variant="danger-outline"
+            size="xs"
             onClick={() => onRetry(item.clientId)}
-            className="inline-flex h-7 shrink-0 items-center gap-1 rounded-[8px] border border-[#fecaca] bg-white px-2.5 text-[12px] font-semibold text-[#991b1b] transition-all duration-200 hover:bg-[#fef2f2] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-2"
           >
             <RotateCcw className="h-3 w-3" aria-hidden="true" />
             <span>Tentar novamente</span>
-          </button>
+          </Button>
         </div>
       )}
     </article>

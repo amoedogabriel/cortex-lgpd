@@ -3,20 +3,34 @@
 @tailwind utilities;
 
 /**
- * Estilos Globais Low-Spec Friendly (Otimizados para PCs de 10 a 15 anos — GPU Integrada Legada).
- * - Proibido usar backdrop-filter, blur, drop-shadow ou animações contínuas que forcem repaint de página inteira.
- * - Cores sólidas de alto contraste, tipografia do sistema e bordas nítidas de 1px.
+ * Estilos Globais Low-Spec Friendly — Cortex LGPD (UFAM)
+ * - Otimizados para estações administrativas de 10–15 anos (GPU integrada legada).
+ * - Proibido usar backdrop-filter, blur, drop-shadow ou animações contínuas pesadas em GPU.
+ * - Tokens semânticos de alto contraste (WCAG 2.2 AA), tipografia local do sistema e bordas 1px.
  */
 
 :root {
-  --bg-page: #f8fafc;
-  --bg-surface: #ffffff;
-  --text-primary: #0f172a;
-  --text-secondary: #334155;
-  --border-solid: #e2e8f0;
-  --ufam-green: #0e5a43;
-  --ufam-focus: #0e6b4f;
-  --ufam-gold: #8a6d1b;
+  --surface-page: #f8fafc;
+  --surface-card: #ffffff;
+  --surface-subtle: #f1f5f9;
+  --surface-muted: #f8fafc;
+  --surface-canvas: #e2e8f0;
+
+  --ink-primary: #0f172a;
+  --ink-secondary: #334155;
+  --ink-muted: #475569;
+
+  --border-subtle: #e2e8f0;
+  --border-default: #cbd5e1;
+  --border-strong: #94a3b8;
+
+  --brand-header: #0c4736;
+  --brand-primary: #0e5a43;
+  --brand-primary-hover: #0a4634;
+  --brand-focus: #0e6b4f;
+  --brand-subtle: #ecfdf5;
+  --brand-border: #a7f3d0;
+  --brand-ink: #065f46;
 }
 
 * {
@@ -27,20 +41,42 @@ html,
 body {
   margin: 0;
   padding: 0;
-  background-color: var(--bg-page);
-  color: var(--text-primary);
+  background-color: var(--surface-page);
+  color: var(--ink-primary);
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeSpeed;
 }
 
-/* Anel de foco acessível global WCAG 2.1 AA para navegação por teclado */
-:focus-visible {
-  outline: 2px solid var(--ufam-focus);
+/* Skip-link acessível para leitores de tela e navegação por teclado (WCAG 2.2 AA) */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 60;
+  padding: 0.625rem 1rem;
+  background-color: var(--brand-header);
+  color: #ffffff;
+  font-size: 0.875rem;
+  font-weight: 600;
+  border: 2px solid #ffffff;
+  border-radius: 0.5rem;
+}
+
+.skip-link:focus {
+  left: 0.75rem;
+  top: 0.75rem;
+  outline: 2px solid #ffffff;
   outline-offset: 2px;
 }
 
-/* Indicador indeterminado leve sem blur/sombra (GPU integrada legada) */
+/* Anel de foco acessível global WCAG 2.2 AA para navegação por teclado */
+:focus-visible {
+  outline: 2px solid var(--brand-focus);
+  outline-offset: 2px;
+}
+
+/* Indicador indeterminado leve (somente translateX em camada simples, sem blur/sombra) */
 @keyframes ufam-indeterminate-slide {
   0% {
     transform: translateX(-100%);
@@ -56,7 +92,7 @@ body {
   will-change: transform;
 }
 
-/* Remove animações e transições pesadas automaticamente se o S.O. solicitar redução de movimento */
+/* Remove animações e transições se o S.O. solicitar redução de movimento */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

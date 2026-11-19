@@ -6,20 +6,12 @@
  * Requisitos atendidos:
  * 1. DOM Virtualizado de Página Única: monta exclusivamente a página ativa (`currentPage`) no DOM (< 80 MB de RAM).
  * 2. Preload silencioso em background da página seguinte (`new Image().src = nextPageImageUrl`) quando pronta.
- * 3. Controles simples de zoom (`100%`, `125%`, `150%`).
- * 4. Sobreposição vetorial `<svg viewBox="0 0 1000 1000" preserveAspectRatio="none">` com cores semânticas estritas:
- *    - `PERSONAL_COMMON`: Azul (`stroke="#2563eb"`)
- *    - `PERSONAL_SENSITIVE`: Vermelho (`stroke="#dc2626"`)
- *    - `FINANCIAL_BANKING`: Violeta (`stroke="#7c3aed"`)
- *    - `MINOR_OR_DEPENDENT`: Âmbar (`stroke="#d97706"`)
- *    - `MANUAL`: Cinza escuro (`stroke="#1f2937"`)
- * 5. Visualização Diferenciada dos 3 Modos (`BLACKOUT`, `PARTIAL_MASK`, `KEEP`):
- *    - `BLACKOUT`: retângulo sólido escuro / colorido da categoria (ou `#000000` no Modo Prévia Final);
- *    - `PARTIAL_MASK`: retângulo de fundo branco/âmbar claro (`#fffbeb` / `#ffffff`) com borda azul (`#1d4ed8`)
- *      e texto `<text>` centralizado em fonte ampliada e negrito (`fontWeight="700"`) mostrando `***.729.160-**`;
- *    - `KEEP`: contorno tracejado (`strokeDasharray="6,4"`) com fundo transparente.
+ * 3. Skeleton sólido ultraleve (GPU legada) enquanto a imagem WebP da página carrega.
+ * 4. Controles de zoom segmentados (`100%`, `125%`, `150%`).
+ * 5. Sobreposição vetorial `<svg viewBox="0 0 1000 1000" preserveAspectRatio="none">` com paleta taxonômica canônica.
  * 6. Desenho e redimensionamento de tarjas manuais a 60 FPS via manipulação direta de DOM com `useRef`
- *    (`draftRectRef.current.setAttribute(...)`), sem chamar `useState` durante o `onMouseMove`.
+ *    (`draftRectRef.current.setAttribute(...)`), jamais chamando `useState` durante `onMouseMove`.
+ * 7. Acessibilidade de teclado (WCAG 2.2 AA) nas marcações interativas do SVG.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -31,6 +23,12 @@ import {
   EyeOff,
   Trash2,
 } from "lucide-react";
+import {
+  Button,
+  Kbd,
+  PII_CATEGORY_STYLES,
+  SegmentedControl,
+} from "@/components/ui";
 import { cn } from "@/lib/utils";
 import type {
   DetectedOccurrence,
@@ -69,26 +67,29 @@ interface SemanticSvgPalette {
   label: string;
 }
 
-export const SEMANTIC_SVG_COLORS: Record<PiiCategory | "MANUAL", SemanticSvgPalette> = {
+export const SEMANTIC_SVG_COLORS: Record<
+  PiiCategory | "MANUAL",
+  SemanticSvgPalette
+> = {
   PERSONAL_COMMON: {
-    stroke: "#2563eb",
-    fillSelected: "rgba(37, 99, 235, 0.22)",
-    label: "Dado Pessoal Comum",
+    stroke: PII_CATEGORY_STYLES.PERSONAL_COMMON.svgStroke,
+    fillSelected: PII_CATEGORY_STYLES.PERSONAL_COMMON.svgFillSelected,
+    label: PII_CATEGORY_STYLES.PERSONAL_COMMON.label,
   },
   PERSONAL_SENSITIVE: {
-    stroke: "#dc2626",
-    fillSelected: "rgba(220, 38, 38, 0.24)",
-    label: "Dado Pessoal Sensível (Art. 5º, II)",
+    stroke: PII_CATEGORY_STYLES.PERSONAL_SENSITIVE.svgStroke,
+    fillSelected: PII_CATEGORY_STYLES.PERSONAL_SENSITIVE.svgFillSelected,
+    label: PII_CATEGORY_STYLES.PERSONAL_SENSITIVE.label,
   },
   FINANCIAL_BANKING: {
-    stroke: "#7c3aed",
-    fillSelected: "rgba(124, 58, 237, 0.22)",
-    label: "Financeiro / Bancário",
+    stroke: PII_CATEGORY_STYLES.FINANCIAL_BANKING.svgStroke,
+    fillSelected: PII_CATEGORY_STYLES.FINANCIAL_BANKING.svgFillSelected,
+    label: PII_CATEGORY_STYLES.FINANCIAL_BANKING.label,
   },
   MINOR_OR_DEPENDENT: {
-    stroke: "#d97706",
-    fillSelected: "rgba(217, 119, 6, 0.24)",
-    label: "Menor / Dependente (Art. 14)",
+    stroke: PII_CATEGORY_STYLES.MINOR_OR_DEPENDENT.svgStroke,
+    fillSelected: PII_CATEGORY_STYLES.MINOR_OR_DEPENDENT.svgFillSelected,
+    label: PII_CATEGORY_STYLES.MINOR_OR_DEPENDENT.label,
   },
   MANUAL: {
     stroke: "#1f2937",
@@ -96,6 +97,12 @@ export const SEMANTIC_SVG_COLORS: Record<PiiCategory | "MANUAL", SemanticSvgPale
     label: "Tarja Manual do Servidor",
   },
 };
+
+const ZOOM_OPTIONS: { value: ZoomLevel; label: string; testId: string }[] = [
+  { value: 100, label: "100%", testId: "zoom-btn-100" },
+  { value: 125, label: "125%", testId: "zoom-btn-125" },
+  { value: 150, label: "150%", testId: "zoom-btn-150" },
+];
 
 interface DragInteractionRefState {
   mode: "NONE" | "DRAW_NEW" | "RESIZE_MANUAL";
@@ -149,8 +156,12 @@ export function LightweightPageViewer({
 }: LightweightPageViewerProps) {
   const [zoomLevel, setZoomLevel] = useState<ZoomLevel>(100);
   const [isFinalPreviewMode, setIsFinalPreviewMode] = useState<boolean>(false);
-  const [selectedManualBoxId, setSelectedManualBoxId] = useState<string | null>(null);
+  const [selectedManualBoxId, setSelectedManualBoxId] = useState<string | null>(
+    null
+  );
+  const [loadedImageUrl, setLoadedImageUrl] = useState<string | null>(null);
 
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const draftRectRef = useRef<SVGRectElement | null>(null);
   const dragStateRef = useRef<DragInteractionRefState>({
@@ -172,10 +183,22 @@ export function LightweightPageViewer({
     preloader.src = nextPageImageUrl;
   }, [nextPageImageUrl]);
 
+  // Verifica se a imagem já está em cache no navegador para liberar o skeleton imediatamente
+  useEffect(() => {
+    if (!pageImageUrl) return;
+    const imgEl = imgRef.current;
+    if (imgEl && imgEl.complete && imgEl.naturalWidth > 0) {
+      setLoadedImageUrl(pageImageUrl);
+    }
+  }, [pageImageUrl]);
+
   // Limpa seleção manual ao trocar de página
   useEffect(() => {
     setSelectedManualBoxId(null);
   }, [currentPage]);
+
+  const isImageLoading =
+    Boolean(pageImageUrl) && loadedImageUrl !== pageImageUrl;
 
   // Converte coordenadas de ponteiro do navegador para o sistema [0..1000] do SVG sem causar reflow pesado
   const clientPointToSvgCoords = useCallback(
@@ -352,121 +375,106 @@ export function LightweightPageViewer({
 
   return (
     <section
-      className="overflow-hidden rounded-[12px] border border-[#e2e8f0] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.05)]"
+      className="overflow-hidden rounded-xl border border-line-subtle bg-surface-card shadow-xs"
       aria-label="Visualizador de página e sobreposição de tarjas"
     >
-      {/* Toolbar Principal em Linha Única */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-[#e2e8f0] px-4 py-3">
+      {/* Toolbar Principal Compacta */}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line-subtle bg-surface-card px-3.5 py-2.5">
         {/* Paginação Single-Page */}
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={currentPage <= 1}
             onClick={() => onPageChange(Math.max(1, currentPage - 1))}
             title="Página Anterior (Atalho: Seta Esquerda)"
-            className="inline-flex h-[34px] items-center gap-1 rounded-[8px] border border-[#cbd5e1] bg-white px-2.5 text-[12px] font-semibold text-[#0f172a] transition-all duration-200 hover:bg-[#f1f5f9] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-2"
             data-testid="prev-page-btn"
           >
             <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
             <span>Anterior</span>
-          </button>
+          </Button>
 
           <span
             aria-live="polite"
-            className="px-2 font-mono text-[13px] font-semibold tabular-nums text-[#0f172a]"
+            className="px-2 font-mono text-xs font-semibold tabular-nums text-ink-primary"
             data-testid="current-page-indicator"
           >
             Página {currentPage} de {Math.max(1, totalPages)}
           </span>
 
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={currentPage >= totalPages}
             onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
             title="Próxima Página (Atalho: Seta Direita)"
-            className="inline-flex h-[34px] items-center gap-1 rounded-[8px] border border-[#cbd5e1] bg-white px-2.5 text-[12px] font-semibold text-[#0f172a] transition-all duration-200 hover:bg-[#f1f5f9] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-2"
             data-testid="next-page-btn"
           >
             <span>Próxima</span>
             <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
-          </button>
+          </Button>
         </div>
 
         {/* Controles à Direita: Zoom Segmentado + Desenho Manual + Modo Prévia Final */}
-        <div className="ml-auto flex flex-wrap items-center gap-2">
-          {/* Controle Segmentado de Zoom (100%, 125%, 150%) */}
-          <div
-            className="grid grid-cols-3 gap-[2px] rounded-[8px] bg-[#f1f5f9] p-[2px]"
-            role="group"
-            aria-label="Nível de zoom"
-          >
-            {([100, 125, 150] as ZoomLevel[]).map((level) => (
-              <button
-                key={level}
-                type="button"
-                aria-pressed={zoomLevel === level}
-                onClick={() => setZoomLevel(level)}
-                className={cn(
-                  "h-[30px] w-14 rounded-[6px] font-mono text-[12px] font-semibold tabular-nums transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-1",
-                  zoomLevel === level
-                    ? "bg-[#0f172a] text-white"
-                    : "bg-transparent text-[#334155] hover:bg-white hover:text-[#0f172a]"
-                )}
-                data-testid={`zoom-btn-${level}`}
-              >
-                {level}%
-              </button>
-            ))}
-          </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <SegmentedControl
+            ariaLabel="Nível de zoom"
+            value={zoomLevel}
+            options={ZOOM_OPTIONS}
+            onChange={setZoomLevel}
+            itemClassName="w-12 font-mono tabular-nums"
+          />
 
-          <button
-            type="button"
+          <Button
+            variant={isManualDrawMode ? "dark" : "secondary"}
+            size="sm"
             aria-pressed={isManualDrawMode}
             onClick={onToggleManualDrawMode}
             title="Ativar/Desativar Desenho de Tarja Manual com o mouse (Atalho: tecla M)"
-            className={cn(
-              "inline-flex h-[34px] items-center gap-1.5 whitespace-nowrap rounded-[8px] border px-3 text-[12px] font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-2",
-              isManualDrawMode
-                ? "border-[#0f172a] bg-[#0f172a] text-amber-300"
-                : "border-[#cbd5e1] bg-white text-[#0f172a] hover:bg-[#f1f5f9]"
-            )}
+            className={cn(isManualDrawMode && "text-amber-300")}
             data-testid="toggle-manual-draw-btn"
           >
             <Crosshair className="h-3.5 w-3.5" aria-hidden="true" />
             <span>
-              {isManualDrawMode ? "Desenho Manual: ATIVO" : "Desenhar Tarja Manual"}
+              {isManualDrawMode
+                ? "Desenho Manual: ATIVO"
+                : "Desenhar Tarja Manual"}
             </span>{" "}
-            <kbd className="rounded-[5px] border border-[#cbd5e1] border-b-2 bg-white px-1.5 py-0.5 font-mono text-[11px] font-semibold leading-none text-[#334155]">
-              <span className="sr-only">(</span>M<span className="sr-only">)</span>
-            </kbd>
-          </button>
+            <Kbd>
+              <span className="sr-only">(</span>M
+              <span className="sr-only">)</span>
+            </Kbd>
+          </Button>
 
           {isManualDrawMode && (
             <select
               aria-label="Categoria LGPD para novas tarjas manuais"
               value={manualDrawCategory}
-              onChange={(e) => onManualDrawCategoryChange(e.target.value as PiiCategory)}
-              className="h-[34px] rounded-[8px] border border-[#cbd5e1] bg-white px-2.5 text-[12px] font-medium text-[#0f172a] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-2"
+              onChange={(e) =>
+                onManualDrawCategoryChange(e.target.value as PiiCategory)
+              }
+              className="h-8 rounded-lg border border-line bg-surface-card px-2 text-xs font-medium text-ink-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-focus focus-visible:ring-offset-2"
               data-testid="manual-draw-category-select"
             >
               <option value="PERSONAL_COMMON">Cat: Pessoal Comum</option>
-              <option value="PERSONAL_SENSITIVE">Cat: Sensível (Art. 5º, II)</option>
-              <option value="FINANCIAL_BANKING">Cat: Financeiro / Bancário</option>
-              <option value="MINOR_OR_DEPENDENT">Cat: Menor / Dependente</option>
+              <option value="PERSONAL_SENSITIVE">
+                Cat: Sensível (Art. 5º, II)
+              </option>
+              <option value="FINANCIAL_BANKING">
+                Cat: Financeiro / Bancário
+              </option>
+              <option value="MINOR_OR_DEPENDENT">
+                Cat: Menor / Dependente
+              </option>
             </select>
           )}
 
-          <button
-            type="button"
+          <Button
+            variant={isFinalPreviewMode ? "dark" : "secondary"}
+            size="sm"
             aria-pressed={isFinalPreviewMode}
             onClick={() => setIsFinalPreviewMode((prev) => !prev)}
             title="Alterna entre cores de revisão por categoria e prévia final de saída"
-            className={cn(
-              "inline-flex h-[34px] items-center gap-1.5 whitespace-nowrap rounded-[8px] border px-3 text-[12px] font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e6b4f] focus-visible:ring-offset-2",
-              isFinalPreviewMode
-                ? "border-[#0f172a] bg-[#0f172a] text-white"
-                : "border-[#cbd5e1] bg-white text-[#0f172a] hover:bg-[#f1f5f9]"
-            )}
             data-testid="toggle-final-preview-btn"
           >
             {isFinalPreviewMode ? (
@@ -480,97 +488,157 @@ export function LightweightPageViewer({
                 <span>Modo Prévia Final</span>
               </>
             )}
-          </button>
+          </Button>
         </div>
       </div>
 
-      {/* Barra de Legenda Compacta em Chips Pastéis */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-[#e2e8f0] bg-[#f8fafc] px-4 py-2.5">
-        <ul className="flex flex-wrap items-center gap-2" aria-label="Legenda de categorias">
-          <li className="inline-flex h-[28px] items-center gap-1.5 rounded-full border border-[#bfdbfe] bg-[#eff6ff] px-2.5 text-[12px] font-semibold text-[#1d4ed8]">
-            <span className="inline-block h-2 w-2 rounded-full bg-[#2563eb]" aria-hidden="true" />
+      {/* Barra de Legenda Compacta com Contraste WCAG 2.2 AA */}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line-subtle bg-surface-muted px-3.5 py-2">
+        <ul
+          className="flex flex-wrap items-center gap-1.5"
+          aria-label="Legenda de categorias"
+        >
+          <li className="inline-flex h-6 items-center gap-1.5 rounded-full border border-category-commonBorder bg-category-commonBg px-2 text-[11px] font-semibold text-category-commonText">
+            <span
+              className="inline-block h-2 w-2 rounded-full bg-category-commonAccent"
+              aria-hidden="true"
+            />
             Pessoal Comum
           </li>
-          <li className="inline-flex h-[28px] items-center gap-1.5 rounded-full border border-[#fecaca] bg-[#fef2f2] px-2.5 text-[12px] font-semibold text-[#b91c1c]">
-            <span className="inline-block h-2 w-2 rounded-full bg-[#dc2626]" aria-hidden="true" />
+          <li className="inline-flex h-6 items-center gap-1.5 rounded-full border border-category-sensitiveBorder bg-category-sensitiveBg px-2 text-[11px] font-semibold text-category-sensitiveText">
+            <span
+              className="inline-block h-2 w-2 rounded-full bg-category-sensitiveAccent"
+              aria-hidden="true"
+            />
             Sensível (Art. 5º, II)
           </li>
-          <li className="inline-flex h-[28px] items-center gap-1.5 rounded-full border border-[#ddd6fe] bg-[#f5f3ff] px-2.5 text-[12px] font-semibold text-[#6d28d9]">
-            <span className="inline-block h-2 w-2 rounded-full bg-[#7c3aed]" aria-hidden="true" />
+          <li className="inline-flex h-6 items-center gap-1.5 rounded-full border border-category-financialBorder bg-category-financialBg px-2 text-[11px] font-semibold text-category-financialText">
+            <span
+              className="inline-block h-2 w-2 rounded-full bg-category-financialAccent"
+              aria-hidden="true"
+            />
             Financeiro / Bancário
           </li>
-          <li className="inline-flex h-[28px] items-center gap-1.5 rounded-full border border-[#fde68a] bg-[#fffbeb] px-2.5 text-[12px] font-semibold text-[#b45309]">
-            <span className="inline-block h-2 w-2 rounded-full bg-[#d97706]" aria-hidden="true" />
+          <li className="inline-flex h-6 items-center gap-1.5 rounded-full border border-category-minorBorder bg-category-minorBg px-2 text-[11px] font-semibold text-category-minorText">
+            <span
+              className="inline-block h-2 w-2 rounded-full bg-category-minorAccent"
+              aria-hidden="true"
+            />
             Menor / Dependente
           </li>
-          <li className="inline-flex h-[28px] items-center gap-1.5 rounded-full border border-[#cbd5e1] bg-white px-2.5 text-[12px] font-semibold text-[#334155]">
-            <span aria-hidden="true" className="font-mono text-[11px] font-bold text-[#0f172a]">
+          <li className="inline-flex h-6 items-center gap-1.5 rounded-full border border-line bg-surface-card px-2 text-[11px] font-semibold text-ink-secondary">
+            <span
+              aria-hidden="true"
+              className="font-mono text-[10px] font-bold text-ink-primary"
+            >
               ***.XXX-**
             </span>
             Mascaramento Parcial
           </li>
         </ul>
 
-        <div className="ml-auto text-[11px] text-[#64748b]">
-          <strong className="font-semibold text-[#334155]">Preenchido:</strong> Tarja Total •{" "}
-          <strong className="font-semibold text-[#334155]">***.XXX:</strong> Máscara Parcial •{" "}
-          <strong className="font-semibold text-[#334155]">Tracejado:</strong> Mantido
+        <div className="text-[11px] text-ink-muted">
+          <strong className="font-semibold text-ink-secondary">
+            Preenchido:
+          </strong>{" "}
+          Tarja Total •{" "}
+          <strong className="font-semibold text-ink-secondary">***.XXX:</strong>{" "}
+          Máscara Parcial •{" "}
+          <strong className="font-semibold text-ink-secondary">
+            Tracejado:
+          </strong>{" "}
+          Mantido
         </div>
       </div>
 
       {/* Barra Contextual quando uma Tarja Manual está selecionada para ajuste/exclusão */}
       {activeSelectedManualBox && (
         <div
-          className="flex flex-wrap items-center justify-between gap-2 border-b border-[#0f172a] bg-[#0f172a] px-4 py-2 text-[12px] text-white"
+          className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-ink-primary px-4 py-2 text-xs text-white"
           data-testid="selected-manual-box-toolbar"
         >
           <span>
-            <strong className="font-semibold text-amber-300">Tarja Manual Selecionada</strong> (Pág. {activeSelectedManualBox.page_number}) — Arraste o quadradinho no canto inferior direito da tarja para redimensionar ou clique em excluir.
+            <strong className="font-semibold text-amber-300">
+              Tarja Manual Selecionada
+            </strong>{" "}
+            (Pág. {activeSelectedManualBox.page_number}) — Arraste o quadradinho
+            no canto inferior direito da tarja para redimensionar ou clique em
+            excluir.
           </span>
           <div className="flex items-center gap-2">
-            <button
-              type="button"
+            <Button
+              variant="danger"
+              size="xs"
               onClick={() => {
                 onRemoveManualBox(activeSelectedManualBox.id);
                 setSelectedManualBoxId(null);
               }}
-              className="inline-flex items-center gap-1 rounded-lg border border-red-700 bg-red-800 px-2.5 py-1 font-semibold text-white transition-colors duration-200 hover:bg-red-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2"
+              className="border-red-700 bg-red-800 hover:bg-red-900 focus-visible:ring-white"
               data-testid="delete-manual-box-btn"
             >
               <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Excluir Tarja Manual</span>
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="ghost"
+              size="xs"
               onClick={() => setSelectedManualBoxId(null)}
-              className="rounded-lg border border-slate-600 bg-slate-800 px-2.5 py-1 text-slate-200 transition-colors duration-200 hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2"
+              className="border-slate-600 bg-slate-800 text-slate-100 hover:bg-slate-700 hover:text-white focus-visible:ring-white"
             >
               Fechar
-            </button>
+            </Button>
           </div>
         </div>
       )}
 
-      {/* Viewport de Página Única sobre Canvas de Alto Contraste (DOM Virtualizado: monta APENAS a página atual) */}
-      <div className="overflow-auto bg-[#e2e8f0] p-6">
+      {/* Viewport de Página Única sobre Canvas Neutro (DOM Virtualizado: monta APENAS a página atual) */}
+      <div className="overflow-auto bg-surface-canvas p-4 sm:p-5">
         <div
-          className="relative mx-auto overflow-hidden rounded-sm border border-[#cbd5e1] bg-white shadow-[0_4px_12px_rgba(15,23,42,0.12)]"
+          className="relative mx-auto overflow-hidden rounded-sm border border-line bg-surface-card shadow-sm"
           style={containerMaxWidthStyle}
         >
+          {/* Skeleton Sólido Leve (Zero GPU Blur / Zero Shimmer Pesado) durante carregamento do WebP */}
+          {isImageLoading && (
+            <div
+              aria-hidden="true"
+              data-testid="page-image-skeleton"
+              className="pointer-events-none absolute inset-0 z-10 flex flex-col gap-4 bg-surface-card p-8"
+            >
+              <div className="h-6 w-2/3 rounded bg-surface-subtle" />
+              <div className="h-3.5 w-1/2 rounded bg-surface-subtle" />
+              <div className="mt-4 space-y-2.5">
+                <div className="h-3 w-full rounded bg-surface-subtle" />
+                <div className="h-3 w-11/12 rounded bg-surface-subtle" />
+                <div className="h-3 w-5/6 rounded bg-surface-subtle" />
+              </div>
+              <div className="mt-4 space-y-2.5">
+                <div className="h-3 w-full rounded bg-surface-subtle" />
+                <div className="h-3 w-4/5 rounded bg-surface-subtle" />
+              </div>
+            </div>
+          )}
+
           {pageImageUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
+              ref={imgRef}
               key={`single-page-webp-${currentPage}`}
               src={pageImageUrl}
               alt={`Página ${currentPage} renderizada em WebP`}
               decoding="async"
               draggable={false}
-              className="block h-auto w-full select-none"
+              onLoad={() => setLoadedImageUrl(pageImageUrl)}
+              onError={() => setLoadedImageUrl(pageImageUrl)}
+              className="block min-h-[320px] h-auto w-full select-none"
               data-testid="page-webp-image"
             />
           ) : (
-            <div className="flex h-96 items-center justify-center bg-[#f8fafc] text-[13px] font-medium text-[#475569]">
-              Aguardando renderização da Página {currentPage}...
+            <div
+              className="flex h-96 flex-col items-center justify-center gap-2 bg-surface-muted p-6 text-center text-[13px] font-medium text-ink-muted"
+              data-testid="page-image-skeleton"
+            >
+              <div className="h-2.5 w-40 rounded-full bg-surface-canvas" />
+              <span>Aguardando renderização da Página {currentPage}...</span>
             </div>
           )}
 
@@ -584,7 +652,7 @@ export function LightweightPageViewer({
             onMouseUp={finishDragInteraction}
             onMouseLeave={finishDragInteraction}
             className={cn(
-              "absolute inset-0 h-full w-full select-none",
+              "absolute inset-0 z-20 h-full w-full select-none",
               isManualDrawMode ? "cursor-crosshair" : "cursor-default"
             )}
             data-testid="page-overlay-svg"
@@ -600,7 +668,8 @@ export function LightweightPageViewer({
               const isPartialMask = effectiveMode === "PARTIAL_MASK";
               const isFocused = activeOccurrenceId === occ.id;
               const palette =
-                SEMANTIC_SVG_COLORS[occ.category] || SEMANTIC_SVG_COLORS.PERSONAL_COMMON;
+                SEMANTIC_SVG_COLORS[occ.category] ||
+                SEMANTIC_SVG_COLORS.PERSONAL_COMMON;
 
               const x = occ.x0_norm * 1000;
               const y = occ.y0_norm * 1000;
@@ -645,19 +714,32 @@ export function LightweightPageViewer({
                 <g key={occ.id}>
                   <rect
                     data-testid={`svg-occurrence-rect-${occ.id}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`${occ.entity_type} (${palette.label}), modo atual: ${modeLabel}. Pressione Enter ou Espaço para alternar.`}
                     x={x}
                     y={y}
                     width={width}
                     height={height}
                     fill={fillValue}
                     stroke={strokeValue}
-                    strokeWidth={isFocused ? 3 : isSelectedForRedaction ? 2 : 1.5}
+                    strokeWidth={
+                      isFocused ? 3 : isSelectedForRedaction ? 2 : 1.5
+                    }
                     strokeDasharray={dashArray}
-                    className="cursor-pointer"
+                    className="cursor-pointer focus-visible:outline-none"
                     onClick={(e) => {
                       e.stopPropagation();
                       onSelectOccurrence(occ.id);
                       onToggleOccurrence(occ.id);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onSelectOccurrence(occ.id);
+                        onToggleOccurrence(occ.id);
+                      }
                     }}
                   >
                     <title>
@@ -707,6 +789,9 @@ export function LightweightPageViewer({
                 <g key={mbox.id}>
                   <rect
                     data-testid={`svg-manual-rect-${mbox.id}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Tarja manual na página ${mbox.page_number}. Pressione Enter para selecionar ou Delete para remover.`}
                     x={x}
                     y={y}
                     width={width}
@@ -714,16 +799,31 @@ export function LightweightPageViewer({
                     fill={fillValue}
                     stroke={strokeValue}
                     strokeWidth={isManualFocused ? 3 : 2}
-                    className="cursor-pointer"
+                    className="cursor-pointer focus-visible:outline-none"
                     onClick={(e) => {
                       e.stopPropagation();
                       setSelectedManualBoxId((prev) =>
                         prev === mbox.id ? null : mbox.id
                       );
                     }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setSelectedManualBoxId((prev) =>
+                          prev === mbox.id ? null : mbox.id
+                        );
+                      } else if (e.key === "Delete" || e.key === "Backspace") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onRemoveManualBox(mbox.id);
+                        setSelectedManualBoxId(null);
+                      }
+                    }}
                   >
                     <title>
-                      Tarja Manual ({mbox.category}) — Clique para ajustar ou excluir
+                      Tarja Manual ({mbox.category}) — Clique para ajustar ou
+                      excluir
                     </title>
                   </rect>
 
