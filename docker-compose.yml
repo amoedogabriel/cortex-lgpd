@@ -1,0 +1,147 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ufam-redaction-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ufam_redactor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ufam_secret_password_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-ufam_redaction_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ufam_redactor} -d ${POSTGRES_DB:-ufam_redaction_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ufam_redaction_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: ufam-redaction-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - ufam_redaction_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ufam-redaction-backend
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-ufam_redactor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ufam_secret_password_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-ufam_redaction_db}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ufam_redactor}:${POSTGRES_PASSWORD:-ufam_secret_password_change_me}@postgres:5432/${POSTGRES_DB:-ufam_redaction_db}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      TEMP_STORAGE_DIR: /tmp/ufam_redaction_spool
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - pdf_transient_spool:/tmp/ufam_redaction_spool
+    tmpfs:
+      - /tmp:size=256M,mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ufam_redaction_net
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ufam-redaction-worker
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-ufam_redactor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ufam_secret_password_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-ufam_redaction_db}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ufam_redactor}:${POSTGRES_PASSWORD:-ufam_secret_password_change_me}@postgres:5432/${POSTGRES_DB:-ufam_redaction_db}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      TEMP_STORAGE_DIR: /tmp/ufam_redaction_spool
+    volumes:
+      - ./backend:/app
+      - pdf_transient_spool:/tmp/ufam_redaction_spool
+    tmpfs:
+      - /tmp:size=512M,mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      celery -A app.worker.celery_app:celery_app worker --loglevel=info --concurrency=2 -Q default
+    networks:
+      - ufam_redaction_net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ufam-redaction-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_BACKEND_ORIGIN: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - ufam_redaction_net
+
+volumes:
+  postgres_data:
+    driver: local
+  pdf_transient_spool:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1024m,mode=1770
+
+networks:
+  ufam_redaction_net:
+    driver: bridge

@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Estilos Globais Low-Spec Friendly (Otimizados para PCs de 10 a 15 anos — GPU Integrada Legada).
+ * - Proibido usar backdrop-filter, blur, drop-shadow ou animações contínuas que forcem repaint de página inteira.
+ * - Cores sólidas de alto contraste, tipografia do sistema e bordas nítidas de 1px.
+ */
+
+:root {
+  --bg-page: #f8fafc;
+  --bg-surface: #ffffff;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --border-solid: #e2e8f0;
+  --ufam-green: #0e5a43;
+  --ufam-focus: #0e6b4f;
+  --ufam-gold: #8a6d1b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-page);
+  color: var(--text-primary);
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeSpeed;
+}
+
+/* Anel de foco acessível global WCAG 2.1 AA para navegação por teclado */
+:focus-visible {
+  outline: 2px solid var(--ufam-focus);
+  outline-offset: 2px;
+}
+
+/* Indicador indeterminado leve sem blur/sombra (GPU integrada legada) */
+@keyframes ufam-indeterminate-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.progress-indeterminate-bar {
+  width: 34%;
+  animation: ufam-indeterminate-slide 1.5s linear infinite;
+  will-change: transform;
+}
+
+/* Remove animações e transições pesadas automaticamente se o S.O. solicitar redução de movimento */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
