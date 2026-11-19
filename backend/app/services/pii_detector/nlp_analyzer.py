@@ -22,16 +22,16 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from app.core.ml_models import ml_registry
-from app.models.enums import DataCategory
+from app.models.enums import DataCategory, RedactionActionMode
 from app.services.pdf_extractor.extractor import ExtractedTableCell, UnifiedToken
 from app.services.pii_detector.context_filter import (
     is_false_positive_institutional_text,
     should_suppress_detection,
 )
-from app.services.pii_detector.regex_patterns import COMPILED_REGEX_SPECS
+from app.services.pii_detector.regex_patterns import COMPILED_REGEX_SPECS, RegexPatternSpec
 from app.services.pii_detector.validators import validate_titulo_eleitor_uf
 
 logger = logging.getLogger(__name__)
@@ -518,6 +518,7 @@ class RawTextSpanDetection:
     confidence: float
     detector_source: str  # "REGEX" ou "SPACY_NLP"
     override_tokens: tuple[UnifiedToken, ...] | None = None
+    preferred_action_mode: RedactionActionMode | None = None
 
 
 def ensure_ufam_entity_ruler_configured(nlp: Any) -> Any:
@@ -721,6 +722,7 @@ def _append_table_detection(
     detector_source: str,
     existing_detections: list[RawTextSpanDetection],
     replace_shorter_person: bool = True,
+    preferred_action_mode: RedactionActionMode | None = None,
 ) -> None:
     """Registra detecção vinda de célula de tabela com span exato em `full_text` ou `override_tokens`."""
     cell_matched_tokens = _tokens_for_cell_match(cell, match_start, match_end, matched_text)
@@ -749,6 +751,7 @@ def _append_table_detection(
             confidence=confidence,
             detector_source=detector_source,
             override_tokens=cell_matched_tokens,
+            preferred_action_mode=preferred_action_mode,
         )
         _upsert_person_or_span_detection(
             existing_detections,
@@ -775,6 +778,7 @@ def _append_table_detection(
                         confidence=confidence,
                         detector_source=detector_source,
                         override_tokens=cell_matched_tokens,
+                        preferred_action_mode=preferred_action_mode,
                     )
                     _upsert_person_or_span_detection(
                         existing_detections,
@@ -797,6 +801,7 @@ def _append_table_detection(
             confidence=confidence,
             detector_source=detector_source,
             override_tokens=cell_matched_tokens,
+            preferred_action_mode=preferred_action_mode,
         )
         _upsert_person_or_span_detection(
             existing_detections,
@@ -812,6 +817,7 @@ def _extract_table_aware_spans_for_page(
     existing_detections: list[RawTextSpanDetection],
     *,
     run_regex_on_cells: bool = False,
+    custom_regex_specs: Sequence[RegexPatternSpec] | None = None,
 ) -> None:
     """
     Inspeciona as células de tabelas extraídas da página para identificar:
@@ -847,11 +853,14 @@ def _extract_table_aware_spans_for_page(
 
         # 0. Varredura Regex dentro da célula
         if run_regex_on_cells:
-            for spec in COMPILED_REGEX_SPECS:
-                for match in spec.pattern.finditer(val_clean):
+            cell_specs = (*COMPILED_REGEX_SPECS, *(custom_regex_specs or ()))
+            for spec in cell_specs:
+                for match_idx, match in enumerate(spec.pattern.finditer(val_clean)):
+                    if spec.is_custom and match_idx >= 500:
+                        break
                     grp = spec.value_group if spec.value_group <= (match.lastindex or 0) else 0
                     val = match.group(grp)
-                    if not val:
+                    if not val or match.start(grp) == match.end(grp):
                         continue
                     if spec.validator is not None and not spec.validator(val):
                         continue
@@ -859,7 +868,9 @@ def _extract_table_aware_spans_for_page(
                         val = _trim_person_text_only(val)
                         if not val:
                             continue
-                    if spec.entity_type in ("PROCESSO_SEI", "REMUNERATION"):
+                    if spec.is_custom:
+                        pass
+                    elif spec.entity_type in ("PROCESSO_SEI", "REMUNERATION"):
                         if spec.entity_type == "PROCESSO_SEI" and should_suppress_detection(
                             entity_type=spec.entity_type,
                             matched_value=val,
@@ -888,8 +899,9 @@ def _extract_table_aware_spans_for_page(
                         match_start=match.start(grp),
                         match_end=match.end(grp),
                         confidence=spec.base_confidence,
-                        detector_source="REGEX",
+                        detector_source="CUSTOM_REGEX" if spec.is_custom else "REGEX",
                         existing_detections=existing_detections,
+                        preferred_action_mode=spec.preferred_action_mode,
                     )
 
         # 1. Coluna de Conta Bancária ("Conta", "C/C", "Conta Corrente")
@@ -1149,17 +1161,22 @@ def _extract_regex_spans_for_page(
     page_number: int,
     full_text: str,
     table_cells: list[ExtractedTableCell] | None = None,
+    *,
+    custom_regex_specs: Sequence[RegexPatternSpec] | None = None,
 ) -> list[RawTextSpanDetection]:
     """Executa todas as expressões regulares pré-compiladas e validadores matemáticos no texto da página."""
     detections: list[RawTextSpanDetection] = []
     if not full_text:
         return detections
 
-    for spec in COMPILED_REGEX_SPECS:
-        for match in spec.pattern.finditer(full_text):
+    all_specs = (*COMPILED_REGEX_SPECS, *(custom_regex_specs or ()))
+    for spec in all_specs:
+        for match_idx, match in enumerate(spec.pattern.finditer(full_text)):
+            if spec.is_custom and match_idx >= 500:
+                break
             grp = spec.value_group if spec.value_group <= (match.lastindex or 0) else 0
             val = match.group(grp)
-            if not val:
+            if not val or match.start(grp) == match.end(grp):
                 continue
 
             start_char, end_char = match.span(grp)
@@ -1176,7 +1193,7 @@ def _extract_regex_spans_for_page(
             if spec.validator is not None and not spec.validator(val):
                 continue
 
-            if should_suppress_detection(
+            if not spec.is_custom and should_suppress_detection(
                 entity_type=spec.entity_type,
                 matched_value=val,
                 full_text=full_text,
@@ -1194,7 +1211,8 @@ def _extract_regex_spans_for_page(
                 start_char=start_char,
                 end_char=end_char,
                 confidence=spec.base_confidence,
-                detector_source="REGEX",
+                detector_source="CUSTOM_REGEX" if spec.is_custom else "REGEX",
+                preferred_action_mode=spec.preferred_action_mode,
             )
             _upsert_person_or_span_detection(detections, det, allow_replace_shorter_person=True)
 
@@ -1204,6 +1222,7 @@ def _extract_regex_spans_for_page(
         table_cells=table_cells,
         existing_detections=detections,
         run_regex_on_cells=True,
+        custom_regex_specs=custom_regex_specs,
     )
 
     return detections
@@ -1600,6 +1619,8 @@ def propagate_person_names_across_batch(
 
 def analyze_pages_batch(
     pages_payload: list[tuple[int, str, list[ExtractedTableCell] | None]],
+    *,
+    custom_regex_specs: Sequence[RegexPatternSpec] | None = None,
 ) -> dict[int, list[RawTextSpanDetection]]:
     """
     Analisa um lote de páginas em alta velocidade combinando Regex, Validadores Matemáticos,
@@ -1621,6 +1642,7 @@ def analyze_pages_batch(
             page_number=page_num,
             full_text=full_text,
             table_cells=table_cells,
+            custom_regex_specs=custom_regex_specs,
         )
 
     docs = nlp.pipe(texts, batch_size=16, disable=active_disable)

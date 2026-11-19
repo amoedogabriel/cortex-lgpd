@@ -49,6 +49,7 @@ from app.services.pii_detector.entity_mapper import (
     detect_pii_in_single_page,
     propagate_person_names_across_pages,
 )
+from app.services.pii_detector.regex_patterns import compile_custom_regex_specs
 from app.services.redactor.pdf_redactor import RedactionBoxSpec
 from app.services.redactor.structural_sanitizer import execute_complete_redaction_pipeline
 from app.services.report_generator import (
@@ -757,10 +758,13 @@ def process_single_page_into_state(
         except ValueError:
             detected_profile = DocumentProfile.RESTRICTED_PROCESS
 
+    raw_custom_rules = state.get("custom_regexes") or []
+    custom_specs = compile_custom_regex_specs(raw_custom_rules) if raw_custom_rules else None
     entities = detect_pii_in_single_page(
         page_ext,
         session_salt=job_id,
         document_profile=detected_profile,
+        custom_regex_specs=custom_specs,
     )
     pii_elapsed_ms = (time.perf_counter() - t_pii_start) * 1000.0
 

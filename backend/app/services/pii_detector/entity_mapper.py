@@ -25,6 +25,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Sequence
 
 import fitz  # PyMuPDF
 
@@ -45,6 +46,7 @@ from app.services.pii_detector.nlp_analyzer import (
     analyze_pages_batch,
     propagate_person_names_across_batch,
 )
+from app.services.pii_detector.regex_patterns import RegexPatternSpec
 from app.services.pii_detector.validators import strip_non_digits
 from app.services.redactor.pdf_redactor import generate_masked_preview
 
@@ -786,11 +788,15 @@ def _convert_raw_detections_to_mapped_entities(
             group_seed_text = canon_map.get(norm_person, det.matched_text)
 
         grp_id = compute_entity_group_id(det.entity_type, group_seed_text, session_salt=session_salt)
-        rec_mode = compute_recommended_action_mode(
-            entity_type=det.entity_type,
-            category=det.category,
-            document_profile=document_profile,
-            linked_to_minor_or_sensitive=linked_to_minor_or_sensitive,
+        rec_mode = (
+            det.preferred_action_mode
+            if det.preferred_action_mode is not None
+            else compute_recommended_action_mode(
+                entity_type=det.entity_type,
+                category=det.category,
+                document_profile=document_profile,
+                linked_to_minor_or_sensitive=linked_to_minor_or_sensitive,
+            )
         )
         full_masked = generate_masked_preview(det.entity_type, det.matched_text)
 
@@ -925,6 +931,7 @@ def detect_pii_in_pages(
     *,
     session_salt: str = "",
     document_profile: DocumentProfile | None = None,
+    custom_regex_specs: Sequence[RegexPatternSpec] | None = None,
 ) -> list[DetectedPIIEntity]:
     """
     Executa a detecção de PII em lote sobre uma lista de `PageExtractionResult`.
@@ -945,7 +952,7 @@ def detect_pii_in_pages(
         first_page_text = indexed_by_page[pages[0].page_number].text
         resolved_profile = classify_document_profile(first_page_text)
 
-    raw_by_page = analyze_pages_batch(batch_payload)
+    raw_by_page = analyze_pages_batch(batch_payload, custom_regex_specs=custom_regex_specs)
 
     all_person_names = [
         d.matched_text
@@ -977,10 +984,12 @@ def detect_pii_in_single_page(
     *,
     session_salt: str = "",
     document_profile: DocumentProfile | None = None,
+    custom_regex_specs: Sequence[RegexPatternSpec] | None = None,
 ) -> list[DetectedPIIEntity]:
     """Atalho para detectar e mapear PII de uma única página extraída (suporte a streaming página a página)."""
     return detect_pii_in_pages(
         [page_result],
         session_salt=session_salt,
         document_profile=document_profile,
+        custom_regex_specs=custom_regex_specs,
     )

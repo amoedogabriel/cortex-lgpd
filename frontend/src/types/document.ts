@@ -40,6 +40,18 @@ export type RedactionActionMode = "BLACKOUT" | "PARTIAL_MASK" | "KEEP";
 export type DocumentProfile = "PUBLIC_TRANSPARENCY" | "RESTRICTED_PROCESS";
 
 /**
+ * Regra de expressão regular personalizada configurada na sessão antes do envio de PDFs.
+ */
+export interface CustomRegexRule {
+  id: string;
+  label: string;
+  pattern: string;
+  category: PiiCategory;
+  action_mode?: RedactionActionMode;
+  case_sensitive?: boolean;
+}
+
+/**
  * Entrada de log verbose estruturado por etapa do processamento (estritamente Zero-PII).
  */
 export interface VerboseStepLog {
@@ -240,6 +252,7 @@ export interface DocumentQueueItemState {
   downloadPdfUrl: string | null;
   downloadReportUrl: string | null;
   errorMessage: string | null;
+  customRegexes?: CustomRegexRule[];
   // Estado isolado de revisão HITL por documento
   currentPage: number;
   deselectedIds: string[];
