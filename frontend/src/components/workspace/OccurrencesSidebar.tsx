@@ -17,6 +17,7 @@ import {
   CheckSquare,
   Filter,
   Layers,
+  Loader2,
   Shield,
   Sparkles,
   Square,
@@ -29,6 +30,7 @@ import {
   SegmentedControl,
 } from "@/components/ui";
 import { cn } from "@/lib/utils";
+import { DocumentProcessingProgress } from "./DocumentProcessingProgress";
 import type {
   DetectedOccurrence,
   DocumentProfile,
@@ -43,7 +45,9 @@ export interface OccurrencesSidebarProps {
   documentProfile?: DocumentProfile;
   processedPages: number;
   totalPages: number;
-  progressPercentage: number;
+  progressPercentage: number | null;
+  currentProcessingPage?: number | null;
+  errorMessage?: string | null;
   currentPage: number;
   allOccurrences: DetectedOccurrence[];
   manualBoxes: ManualRedactionBox[];
@@ -71,6 +75,7 @@ export interface OccurrencesSidebarProps {
   onSetGroupSelection: (groupId: string, shouldSelect: boolean) => void;
   onRemoveManualBox: (manualId: string) => void;
   onOpenConfirmRedactionModal: () => void;
+  onRetryDocument?: () => void;
 }
 
 const CATEGORY_ORDER: PiiCategory[] = [
@@ -102,6 +107,8 @@ export function OccurrencesSidebar({
   processedPages,
   totalPages,
   progressPercentage,
+  currentProcessingPage,
+  errorMessage,
   currentPage,
   allOccurrences,
   manualBoxes,
@@ -123,6 +130,7 @@ export function OccurrencesSidebar({
   onSetGroupSelection,
   onRemoveManualBox,
   onOpenConfirmRedactionModal,
+  onRetryDocument,
 }: OccurrencesSidebarProps) {
   const [scopeFilter, setScopeFilter] = useState<"CURRENT_PAGE" | "ALL_PAGES">(
     "CURRENT_PAGE"
@@ -239,7 +247,12 @@ export function OccurrencesSidebar({
   };
 
   const isPublicTransparency = documentProfile === "PUBLIC_TRANSPARENCY";
-  const isStreamingPages = processedPages < totalPages;
+  const isFailed = status === "FAILED";
+  const isStreamingPages =
+    !isFailed &&
+    status !== "COMPLETED" &&
+    ((totalPages > 0 && processedPages < totalPages) ||
+      (totalPages === 0 && status !== "AWAITING_REVIEW"));
   const currentPageCount = useMemo(
     () => allOccurrences.filter((o) => o.page_number === currentPage).length,
     [allOccurrences, currentPage]
@@ -326,36 +339,17 @@ export function OccurrencesSidebar({
         </div>
       </section>
 
-      {/* Bloco 2 — Progresso das Páginas (SSE) */}
-      <section
-        aria-live="polite"
-        aria-busy={isStreamingPages}
-        className="border-b border-line-subtle px-4 py-3"
-        data-testid="sidebar-sse-progress-banner"
-      >
-        <div className="flex items-center justify-between gap-2">
-          <span className="font-mono text-xs font-semibold tabular-nums text-ink-primary">
-            Páginas prontas: {processedPages} de {Math.max(1, totalPages)} (
-            {progressPercentage}%)
-          </span>
-          <Badge variant="neutral" className="font-mono text-[10px]">
-            {status}
-          </Badge>
-        </div>
-
-        <p className="mt-1 text-[11px] leading-relaxed text-ink-muted">
-          {isStreamingPages
-            ? `Páginas prontas: ${processedPages} de ${totalPages} — Você já pode revisar e marcar as páginas disponíveis enquanto o restante é processado.`
-            : `Todas as ${totalPages} páginas foram analisadas e estão prontas para conferência final.`}
-        </p>
-
-        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface-canvas">
-          <div
-            className="h-full rounded-full bg-brand-primary transition-[width] duration-150"
-            style={{ width: `${Math.min(100, progressPercentage)}%` }}
-          />
-        </div>
-      </section>
+      {/* Bloco 2 — Monitor Consolidado de Processamento em Tempo Real */}
+      <DocumentProcessingProgress
+        status={status}
+        processedPages={processedPages}
+        totalPages={totalPages}
+        progressPercentage={progressPercentage}
+        currentProcessingPage={currentProcessingPage}
+        isApplyingRedaction={isApplyingRedaction}
+        errorMessage={errorMessage}
+        onRetry={onRetryDocument}
+      />
 
       {/* Bloco 3 — Filtros por Categoria LGPD e Sincronização de Repetições */}
       <section
@@ -772,16 +766,27 @@ export function OccurrencesSidebar({
         <Button
           variant="danger"
           size="lg"
-          disabled={isApplyingRedaction}
+          disabled={isApplyingRedaction || isStreamingPages || isFailed}
           onClick={onOpenConfirmRedactionModal}
           className="w-full tabular-nums"
           data-testid="open-confirm-redaction-modal-btn"
         >
-          <Shield className="h-4 w-4 shrink-0" aria-hidden="true" />
+          {isApplyingRedaction || isStreamingPages ? (
+            <Loader2
+              className="h-4 w-4 shrink-0 motion-safe:animate-spin"
+              aria-hidden="true"
+            />
+          ) : (
+            <Shield className="h-4 w-4 shrink-0" aria-hidden="true" />
+          )}
           <span>
             {isApplyingRedaction
-              ? "Executando Tarjamento Físico..."
-              : `Aplicar Tarjamento Definitivo (${totalRedactionsToApply} tarjas)`}
+              ? "Aplicando Tarjamento Físico..."
+              : isFailed
+                ? "Processamento interrompido"
+                : isStreamingPages
+                  ? "Aguardando conclusão da análise..."
+                  : `Aplicar Tarjamento Definitivo (${totalRedactionsToApply} tarjas)`}
           </span>
         </Button>
       </section>

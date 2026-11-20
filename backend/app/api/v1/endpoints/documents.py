@@ -273,7 +273,87 @@ async def stream_document_events(job_id: uuid.UUID) -> StreamingResponse:
 
     async def event_generator() -> AsyncGenerator[str, None]:
         sent_count = 0
+        emitted_pages: set[int] = set()
         buffered = get_buffered_job_events(job_id_str)
+
+        def _build_terminal_sse_event(cur_state: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+            cur_status = cur_state.get("status")
+            doc_prof = cur_state.get("document_profile", DocumentProfile.RESTRICTED_PROCESS.value)
+            tot_pages = int(cur_state.get("total_pages", len(cur_state.get("pages", {}))) or 0)
+            if cur_status == JobStatus.AWAITING_REVIEW.value:
+                return (
+                    "analysis_complete",
+                    {
+                        "event": "analysis_complete",
+                        "job_id": job_id_str,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "data": {
+                            "status": JobStatus.AWAITING_REVIEW.value,
+                            "document_profile": doc_prof,
+                            "total_pages": tot_pages,
+                            "total_occurrences": len(cur_state.get("occurrences", [])),
+                        },
+                    },
+                )
+            if cur_status == JobStatus.COMPLETED.value:
+                return (
+                    "redaction_complete",
+                    {
+                        "event": "redaction_complete",
+                        "job_id": job_id_str,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "data": {
+                            "status": JobStatus.COMPLETED.value,
+                            "redacted_sha256": cur_state.get("redacted_file_sha256"),
+                            "download_pdf_url": cur_state.get("download_pdf_url"),
+                            "download_report_url": cur_state.get("download_report_url"),
+                        },
+                    },
+                )
+            if cur_status == JobStatus.FAILED.value:
+                return (
+                    "error",
+                    {
+                        "event": "error",
+                        "job_id": job_id_str,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "data": {
+                            "status": JobStatus.FAILED.value,
+                            "message": cur_state.get("error_message")
+                            or "Falha técnica durante o processamento do documento.",
+                        },
+                    },
+                )
+            return None
+
+        def _iter_missing_page_events(cur_state: dict[str, Any]) -> list[dict[str, Any]]:
+            pages_map = cur_state.get("pages", {}) or {}
+            tot_pages = int(cur_state.get("total_pages", len(pages_map)) or len(pages_map))
+            doc_prof = cur_state.get("document_profile", DocumentProfile.RESTRICTED_PROCESS.value)
+            out: list[dict[str, Any]] = []
+            for p_key in sorted(pages_map.keys(), key=lambda x: int(x)):
+                p_info = pages_map[p_key]
+                p_num = int(p_info["page_number"])
+                if p_num in emitted_pages:
+                    continue
+                emitted_pages.add(p_num)
+                out.append(
+                    {
+                        "event": "page_ready",
+                        "job_id": job_id_str,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "data": {
+                            "page_number": p_num,
+                            "total_pages": tot_pages,
+                            "status": cur_state.get("status"),
+                            "document_profile": doc_prof,
+                            "image_url": p_info["image_url"],
+                            "occurrences_count": len(p_info.get("occurrences", [])),
+                            "occurrences": p_info.get("occurrences", []),
+                        },
+                    }
+                )
+            return out
 
         if not buffered and state.get("pages"):
             for v_entry in state.get("verbose_logs", []):
@@ -285,62 +365,34 @@ async def stream_document_events(job_id: uuid.UUID) -> StreamingResponse:
                 }
                 yield f"event: verbose_step\ndata: {json.dumps(v_evt, ensure_ascii=False)}\n\n"
 
-            pages_map = state.get("pages", {})
-            total_pages = state.get("total_pages", len(pages_map))
-            doc_profile = state.get("document_profile", DocumentProfile.RESTRICTED_PROCESS.value)
-            for p_key in sorted(pages_map.keys(), key=lambda x: int(x)):
-                p_info = pages_map[p_key]
-                synthetic_evt = {
-                    "event": "page_ready",
-                    "job_id": job_id_str,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "data": {
-                        "page_number": p_info["page_number"],
-                        "total_pages": total_pages,
-                        "status": state.get("status"),
-                        "document_profile": doc_profile,
-                        "image_url": p_info["image_url"],
-                        "occurrences_count": len(p_info.get("occurrences", [])),
-                        "occurrences": p_info.get("occurrences", []),
-                    },
-                }
+            for synthetic_evt in _iter_missing_page_events(state):
                 yield f"event: {synthetic_evt['event']}\ndata: {json.dumps(synthetic_evt, ensure_ascii=False)}\n\n"
 
-            if state.get("status") == JobStatus.AWAITING_REVIEW.value:
-                complete_evt = {
-                    "event": "analysis_complete",
-                    "job_id": job_id_str,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "data": {
-                        "status": JobStatus.AWAITING_REVIEW.value,
-                        "document_profile": doc_profile,
-                        "total_pages": total_pages,
-                        "total_occurrences": len(state.get("occurrences", [])),
-                    },
-                }
-                yield f"event: analysis_complete\ndata: {json.dumps(complete_evt, ensure_ascii=False)}\n\n"
-                return
-
-            if state.get("status") == JobStatus.COMPLETED.value:
-                redacted_evt = {
-                    "event": "redaction_complete",
-                    "job_id": job_id_str,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "data": {
-                        "status": JobStatus.COMPLETED.value,
-                        "download_pdf_url": state.get("download_pdf_url"),
-                        "download_report_url": state.get("download_report_url"),
-                    },
-                }
-                yield f"event: redaction_complete\ndata: {json.dumps(redacted_evt, ensure_ascii=False)}\n\n"
+            terminal = _build_terminal_sse_event(state)
+            if terminal is not None:
+                t_name, t_payload = terminal
+                yield f"event: {t_name}\ndata: {json.dumps(t_payload, ensure_ascii=False)}\n\n"
                 return
 
         while sent_count < len(buffered):
             evt = buffered[sent_count]
             sent_count += 1
             evt_name = evt.get("event", "message")
+            if evt_name == "page_ready" and isinstance(evt.get("data"), dict) and evt["data"].get("page_number"):
+                emitted_pages.add(int(evt["data"]["page_number"]))
             yield f"event: {evt_name}\ndata: {json.dumps(evt, ensure_ascii=False)}\n\n"
             if evt_name in ("analysis_complete", "redaction_complete", "error"):
+                return
+
+        # Em reconexões (ex.: worker Celery avançou em outro processo), reenvia páginas já prontas faltantes
+        fresh_state = load_job_transient_state(job_id_str)
+        if fresh_state:
+            for synthetic_evt in _iter_missing_page_events(fresh_state):
+                yield f"event: {synthetic_evt['event']}\ndata: {json.dumps(synthetic_evt, ensure_ascii=False)}\n\n"
+            terminal = _build_terminal_sse_event(fresh_state)
+            if terminal is not None:
+                t_name, t_payload = terminal
+                yield f"event: {t_name}\ndata: {json.dumps(t_payload, ensure_ascii=False)}\n\n"
                 return
 
         if _is_redis_reachable():
@@ -351,13 +403,30 @@ async def stream_document_events(job_id: uuid.UUID) -> StreamingResponse:
                 pubsub = async_redis.pubsub()
                 await pubsub.subscribe(get_job_channel_name(job_id_str))
                 try:
-                    deadline = time.monotonic() + 120.0
-                    while time.monotonic() < deadline:
+                    # Timeout renovável por atividade (evita corte prematuro em PDFs longos com OCR)
+                    # + keepalive periódico a cada 15s para atravessar proxies sem queda por ociosidade
+                    inactivity_timeout = 180.0
+                    max_total_duration = 1800.0
+                    keepalive_interval = 15.0
+                    started_at = time.monotonic()
+                    last_activity_at = started_at
+                    last_keepalive_at = started_at
+                    last_state_check_at = 0.0
+                    last_seen_processed = int((fresh_state or state).get("processed_pages", 0) or 0)
+
+                    while True:
+                        now = time.monotonic()
+                        if (now - started_at) >= max_total_duration or (now - last_activity_at) >= inactivity_timeout:
+                            break
+
                         current_buffered = get_buffered_job_events(job_id_str)
                         while sent_count < len(current_buffered):
                             evt = current_buffered[sent_count]
                             sent_count += 1
                             evt_name = evt.get("event", "message")
+                            if evt_name == "page_ready" and isinstance(evt.get("data"), dict) and evt["data"].get("page_number"):
+                                emitted_pages.add(int(evt["data"]["page_number"]))
+                            last_activity_at = time.monotonic()
                             yield f"event: {evt_name}\ndata: {json.dumps(evt, ensure_ascii=False)}\n\n"
                             if evt_name in ("analysis_complete", "redaction_complete", "error"):
                                 return
@@ -367,34 +436,38 @@ async def stream_document_events(job_id: uuid.UUID) -> StreamingResponse:
                             try:
                                 evt = json.loads(str(msg["data"]))
                                 evt_name = evt.get("event", "message")
+                                if evt_name == "page_ready" and isinstance(evt.get("data"), dict) and evt["data"].get("page_number"):
+                                    emitted_pages.add(int(evt["data"]["page_number"]))
+                                last_activity_at = time.monotonic()
                                 yield f"event: {evt_name}\ndata: {json.dumps(evt, ensure_ascii=False)}\n\n"
                                 if evt_name in ("analysis_complete", "redaction_complete", "error"):
                                     return
                             except Exception:
                                 pass
 
-                        latest_state = load_job_transient_state(job_id_str)
-                        if latest_state and latest_state.get("status") in (
-                            JobStatus.AWAITING_REVIEW.value,
-                            JobStatus.COMPLETED.value,
-                            JobStatus.FAILED.value,
-                        ):
-                            if latest_state.get("status") == JobStatus.AWAITING_REVIEW.value:
-                                complete_evt = {
-                                    "event": "analysis_complete",
-                                    "job_id": job_id_str,
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                    "data": {
-                                        "status": JobStatus.AWAITING_REVIEW.value,
-                                        "document_profile": latest_state.get(
-                                            "document_profile", DocumentProfile.RESTRICTED_PROCESS.value
-                                        ),
-                                        "total_pages": latest_state.get("total_pages", 0),
-                                        "total_occurrences": len(latest_state.get("occurrences", [])),
-                                    },
-                                }
-                                yield f"event: analysis_complete\ndata: {json.dumps(complete_evt, ensure_ascii=False)}\n\n"
-                            return
+                        now = time.monotonic()
+                        if (now - last_state_check_at) >= 0.6:
+                            last_state_check_at = now
+                            latest_state = load_job_transient_state(job_id_str)
+                            if latest_state:
+                                cur_proc = int(latest_state.get("processed_pages", 0) or 0)
+                                if cur_proc > last_seen_processed:
+                                    last_seen_processed = cur_proc
+                                    last_activity_at = now
+                                    for synthetic_evt in _iter_missing_page_events(latest_state):
+                                        yield f"event: {synthetic_evt['event']}\ndata: {json.dumps(synthetic_evt, ensure_ascii=False)}\n\n"
+
+                                terminal = _build_terminal_sse_event(latest_state)
+                                if terminal is not None:
+                                    for synthetic_evt in _iter_missing_page_events(latest_state):
+                                        yield f"event: {synthetic_evt['event']}\ndata: {json.dumps(synthetic_evt, ensure_ascii=False)}\n\n"
+                                    t_name, t_payload = terminal
+                                    yield f"event: {t_name}\ndata: {json.dumps(t_payload, ensure_ascii=False)}\n\n"
+                                    return
+
+                        if (now - last_keepalive_at) >= keepalive_interval:
+                            last_keepalive_at = now
+                            yield ": keepalive\n\n"
                     return
                 finally:
                     await pubsub.unsubscribe(get_job_channel_name(job_id_str))
@@ -427,7 +500,7 @@ async def stream_document_events(job_id: uuid.UUID) -> StreamingResponse:
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
@@ -539,7 +612,12 @@ async def redact_document(
 
     total_pages = int(state.get("total_pages", 0))
     processed_pages = int(state.get("processed_pages", 0))
+    unreviewed_pages: list[int] | None = None
     if processed_pages < total_pages:
+        pre_analyzed_pages = {
+            int(k) for k in (state.get("pages") or {}).keys() if str(k).isdigit()
+        }
+        unreviewed_pages = sorted(set(range(1, total_pages + 1)) - pre_analyzed_pages)
         analyze_document_task(job_id_str, start_page=processed_pages + 1, end_page=total_pages)
         state = load_job_transient_state(job_id_str) or state
 
@@ -581,6 +659,7 @@ async def redact_document(
         manual_boxes=manual_boxes_dicts,
         redaction_items=redaction_items_dicts,
         global_mode=global_mode_str,
+        unreviewed_pages=unreviewed_pages,
     )
 
     return {

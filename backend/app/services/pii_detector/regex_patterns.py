@@ -3,7 +3,8 @@ Expressões regulares pré-compiladas no carregamento do módulo (`regex_pattern
 
 Evita qualquer recompilação de regex por página ou por documento, garantindo latência
 sub-milissegundo na varredura léxica de textos administrativos da UFAM e capturando
-entidades com quebras de linha (`\\n`), artefatos de OCR e nomes em CAIXA ALTA ou abreviados.
+entidades com quebras de linha (`\\n`), artefatos de OCR (campos colados sem espaço)
+e nomes em CAIXA ALTA ou abreviados.
 """
 
 from __future__ import annotations
@@ -66,10 +67,14 @@ RE_PIS_PASEP_LABELED = re.compile(
     r"(?i)\b(?:pis[\s\n]*/[\s\n]*pasep|pis|pasep|nit|nis)[\s\n]*(?:n[º°o0.]?[\s\n]*)?[:=;\-]?[\s\n]*(\d{3}\.?\d{5}\.?\d{2}-?[\s\n]*\d|\d{11})(?!\d)"
 )
 
-# 5. RG (Padrões estaduais brasileiros + SSP/AM, SESDEC/AM, UFAM)
+# 5. RG (Padrões estaduais brasileiros + SSP/AM, SESDEC/AM, UFAM; tolera órgão emissor colado `RG:1096788SSP/AM`)
 RE_RG_LABELED = re.compile(
-    r"(?i)\b(?:rg|registro[\s\n]+geral|carteira[\s\n]+de[\s\n]+identidade|identidade)[\s\n]*(?:n[º°o0.]?[\s\n]*)?[:=-]?[\s\n]*"
-    r"([0-9]{1,2}\.?[0-9]{3}\.?[0-9]{3}(?:-[\s\n]*[0-9Xx])?|[0-9]{6,10}(?:-[\s\n]*[0-9Xx])?)\b"
+    r"(?i)\b(?:rg|registro[\s\n]+geral|carteira[\s\n]+de[\s\n]*identidade|identidade)[\s\n]*(?:n[º°o0.]?[\s\n]*)?[:=-]?[\s\n]*"
+    r"([0-9]{1,2}\.?[0-9]{3}\.?[0-9]{3}(?:-[\s\n]*[0-9Xx])?|[0-9]{6,10}(?:-[\s\n]*[0-9Xx])?)(?![0-9-])"
+)
+# Número de RG isolado em cédula de identidade (ex.: `0109678-8` acima de `REGISTRO GERAL`); exige contexto via context_filter
+RE_RG_CARD_CONTEXTUAL = re.compile(
+    r"\b(\d{1,2}\.?\d{3}\.?\d{3}-[0-9Xx]|\d{6,8}-[0-9Xx])\b"
 )
 
 # 6. Passaporte brasileiro/internacional
@@ -78,31 +83,37 @@ RE_PASSPORT_LABELED = re.compile(
 )
 
 # 7. Título de Eleitor (12 dígitos: XXXX XXXX XXXX, XXXX.XXXX.XXXX, XXXXXXXXXX-XX ou contínuo)
-# Quando precedido por rótulo explícito, captura APENAS o número no grupo 1 (aceita reais e sintéticos de teste).
 RE_TITULO_ELEITOR_LABELED = re.compile(
     r"(?i)\b(?:t[íi]tulo(?:[\s\n]+de)?[\s\n]+eleitor|t[íi]t\.?[\s\n]*eleitoral?|inscri[çc][ãa]o[\s\n]+eleitoral)"
     r"(?:[\s\n]*n[º°o0.]?)?[:=\s\n]*(\d{4}[\s\.\n]*\d{4}[\s\.\n]*\d{4}|\d{10}-[\s\n]*\d{2}|\d{12})\b"
 )
-# Quando aparecer sem rótulo (ex.: coluna isolada), exige código UF válido do TSE (01..28) e dígito Módulo 11
 RE_TITULO_ELEITOR_STANDALONE = re.compile(
     r"\b(\d{4}[\s\n]+\d{4}[\s\n]+\d{2}[0-2]\d|\d{4}\.\d{4}\.\d{4}|\d{10}-[\s\n]*\d{2})\b"
 )
 
 # 8. Endereços Residenciais Completos (executados ANTES de `RE_CEP` para impedir fragmentação pelo CEP final)
 RE_ADDRESS_LABELED = re.compile(
-    r"(?i)\b(?:endere[cçg]o(?:[ \t]+residencial)?)[ \t]*[:=-][\s\n]*([^\n|]+?(?:CEP[ \t]*[:=-]?[ \t]*\d{2}\.?\d{3}-\d{3}|\d{5}-\d{3}))"
+    r"(?i)\b(?:endere[cçg]o(?:[ \t]+residencial)?)[ \t]*[:=-][\s\n]*([^\n|]+?(?:CEP[ \t]*[:=-]?[ \t]*\d{2}\.?\d{3}-?\d{3}|\d{5}-\d{3}))"
 )
-_ADDR_LINE_CHAR = r"(?:[^\n,;|.]|\n(?![^\n]{0,35}:|\s*$))"
+# Impede invasão de colunas vizinhas financeiras/faturas após quebra de linha (ex.: `786,52 +12×167`)
+_ADDR_LINE_CHAR = (
+    r"(?:[^\n,;|.×+%$]|"
+    r"\n(?=\s*(?:n[º°o.]?\s*\d|bairro\b|conjunto\b|conj\.?|nova\s+rep[uú]blica|quadra\b|qd\.?\b|"
+    r"bloco\b|bl\.?\b|apto\.?\b|apartamento\b|casa\b|sala\b|lote\b|distrito\b|manaus\b|"
+    r"cep\b|japiim\b|aleixo\b|centro\b|cidade\b|parque\b|alvorada\b|adrian[oó]polis\b|"
+    r"flores\b|compensa\b|coroado\b|s[aã]o\s+|santa\s+|vila\b|residencial\b)))"
+)
 RE_RESIDENTIAL_ADDRESS = re.compile(
     rf"(?i)\b((?:Avenida|Av\.?|Rua|Travessa|Tv\.?|Alameda|Estrada)[\s\n]+{_ADDR_LINE_CHAR}{{3,85}}"
     rf"(?:,[\s\n]*(?:n[º°o.]?[\s\n]*)?\d+[A-Za-z0-9/-]*(?:[ \t]+{_ADDR_LINE_CHAR}+)?)?"
     rf"(?:,[\s\n]*(?:Condom[ií]nio|Conjunto|Bloco|Bl\.|Apto\.?|Apartamento|Casa|Sala|Lote|Quadra|Bairro|Centro|Parque|Residencial|Manaus){_ADDR_LINE_CHAR}*)*)"
 )
 
-# 9. CEP brasileiro (ex.: 69067-005 / 69.067-005)
+# 9. CEP brasileiro (suporta colagem OCR `CEP69077-798`, sem hífen rotulado `CEP:69068482` e padrão `69067-005`)
+RE_CEP_LABELED = re.compile(r"(?i)\bcep[\s\n]*[:=-]?[\s\n]*(\d{2}\.?\d{3}-?[\s\n]*\d{3})(?!\d)")
 RE_CEP = re.compile(r"(?i)(?:\bcep[\s\n]*[:=-]?[\s\n]*)?\b(\d{2}\.?\d{3}-[\s\n]*\d{3})\b")
 
-# 10. Telefones fixos, móveis com DDD, rotulados via OCR e E.164 (+5592984310092)
+# 10. Telefones fixos, móveis com DDD, rotulados via OCR, E.164 (+5592984310092) e truncados (+55 97 917...)
 RE_PHONE_LABELED = re.compile(
     r"(?i)\b(?:telefones?|tels?\.?|cel(?:ular)?|fone|whatsapp)[\s\n]*[:=-]?[\s\n]*(\(?\d{2}\)?[\s\n]*9?[\s\n]*\d{4}[-\s–—.]?\d{4})\b"
 )
@@ -110,6 +121,9 @@ RE_PHONE_BR = re.compile(
     r"(?:(?<!\w)\+55[\s\n]*\d{2}[\s\n]*9?\d{4}[-\s–—\n]*\d{4}\b"
     r"|(?:(?<!\w)\+55[\s\n]*)?\([1-9][0-9]\)[\s\n]*(?:9[\s\n]?\d{4}|\d{4})[-\s–—\n]*\d{4}\b"
     r"|(?:(?<!\w)\+55[\s\n]+)?\b[1-9][0-9][ \t]+(?:9?\d{4})[-\s–—]\d{4}\b)"
+)
+RE_PHONE_PARTIAL_INTL = re.compile(
+    r"(?<!\w)(\+55[\s\n]*[1-9]\d[\s\n]*9?\d{3,5}\.{2,3})"
 )
 
 # 11. E-mail
@@ -120,15 +134,22 @@ RE_SIAPE_LABELED = re.compile(
     r"(?i)\b(?:matr[ií]cula[\s\n]+siape|siape|mat\.?[\s\n]*siape)[\s\n]*(?:n[º°o0.]?[\s\n]*)?[:=-]?[\s\n]*(\d{6,8})\b"
 )
 
-# 13. Matrícula Acadêmica UFAM e Número de Inscrição (6 a 10 dígitos, inclusive `Insc.: 20261001`)
+# 13. Matrícula Acadêmica UFAM, Número de Inscrição e Matrícula de Concessionária (6 a 10 dígitos, com DV opcional `-1`)
 RE_MATRICULA_UFAM = re.compile(
-    r"(?i)\b(?:matr[ií]cula(?!\s*siape)(?:[\s\n]+(?:acad[eê]mica|ufam|institucional))?|discente[\s\n]+matr[ií]cula|inscri[cç][aã]o(?![\s\n]+eleitoral)|insc\.?)[\s\n]*(?:n[º°o0.]?[\s\n]*)?[:=-]?[\s\n]*(\d{6,10})\b"
+    r"(?i)\b(?:matr[ií]cula(?!\s*siape)(?:[\s\n]+(?:acad[eê]mica|ufam|institucional))?|discente[\s\n]+matr[ií]cula|inscri[cç][aã]o(?![\s\n]+eleitoral)|insc\.?)[\s\n]*(?:n[º°o0.]?[\s\n]*)?[:=-]?[\s\n]*(\d{6,10}(?:-[0-9Xx])?)\b"
+)
+# Matrícula de concessionária/tabela multi-coluna (ex.: `MATRICULA\nREFERENCIA\nEMISSAO\n1905449-1`)
+RE_MATRICULA_TABLE_ROW = re.compile(
+    r"(?i)\bmatr[ií]cula\b[^\n]{0,40}\n(?:[A-ZÁÉÍÓÚÂÊÔÃÕÇ/\s]{3,35}\n){1,3}(\d{6,10}-[0-9Xx])\b"
 )
 
 # 14. Processo Administrativo SEI / SIPAC UFAM
 RE_SEI_PROCESS = re.compile(r"\b(23105\.\d{6}\s*/\s*\d{4}-\d{2})\b")
 
 # 15. Dados Financeiros e Bancários (`FINANCIAL_BANKING` - Jamais classificar como PERSONAL_SENSITIVE)
+RE_CREDIT_CARD = re.compile(
+    r"(?i)(?<!\d)((?:4\d{3}|5[1-5]\d{2}|2[2-7]\d{2}|6(?:011|5\d{2})|3[47]\d{2})[\s-]*(?:[X*•]{3,5}[\s-]*[X*•]{3,5}|[X*•]{6,10}|\d{4}[\s-]*\d{4})[\s-]*\d{4})\b"
+)
 RE_BANK_AGENCY = re.compile(
     r"(?i)(?:^|[\s|I;,(])(?:ag[eê]ncia(?:[\s\n]+banc[aá]ria)?\b|ag\.?)[:=;\s\n]+(\d{3,5}(?:-[\s\n]*[0-9Xx])?)(?![\d-])"
 )
@@ -155,14 +176,13 @@ RE_PIX_KEY_UUID = re.compile(
 )
 # Valores monetários rotulados ou em contexto de folha/bolsa/tabela financeira (com suporte a R$\n1.400,00)
 RE_REMUNERATION_VALUE = re.compile(
-    r"(?i)\b(?:remunera[cç][aã]o|rendimento[ \t]+bruto|rendimento[ \t]+l[ií]quido|proventos|vencimento(?:[ \t]+b[aá]sico)?|rubrica(?:[ \t]+salarial)?|valor(?:[ \t]+bruto|[ \t]+l[ií]quido|[ \t]+total|[ \t]+da[ \t]+bolsa)?|sal[aá]rio|pens[aã]o|folha|bolsa(?:[\s\n]+(?:acad[eê]mica|aux[ií]lio|pesquisa|extens[aã]o))?)[\s\n]*[:=-]?[\s\n]*(R\$[\s\n]*\d{1,3}(?:\.\d{3})*,\d{2})\b"
+    r"(?i)\b(?:remunera[cç][aã]o|rendimento[ \t]+bruto|rendimento[ \t]+l[ií]quido|proventos|vencimento(?:[ \t]+b[aá]sico)?|rubrica(?:[ \t]+salarial)?|valor[ \t]+(?:bruto|l[ií]quido|total|da[ \t]+bolsa|mensal)|sal[aá]rio|pens[aã]o|folha|bolsa(?:[\s\n]+(?:acad[eê]mica|aux[ií]lio|pesquisa|extens[aã]o))?)[\s\n]*[:=-]?[\s\n]*(R\$[\s\n]*\d{1,3}(?:\.\d{3})*,\d{2})\b"
 )
 RE_MONETARY_VALUE_CONTEXTUAL = re.compile(
     r"(R\$[\s\n]*\d{1,3}(?:\.\d{3})*,\d{2})\b"
 )
 
 # 16. Patologias e Códigos Médicos CID-10 / CID-11 (`PERSONAL_SENSITIVE` - Art. 5º, II, LGPD)
-# Captura patologia completa acompanhada de `(CID-10: ...)` (tolerando `110` para `I10` no OCR)
 RE_SENSITIVE_PATHOLOGY_CID = re.compile(
     r"(?i)\b((?:Epis[óo]dio[\s\n]+Depressivo(?:[\s\n]+(?:Moderado|Leve|Grave))?"
     r"|Lombociatalgia[\s\n]+Aguda"
@@ -175,7 +195,6 @@ RE_SENSITIVE_PATHOLOGY_CID = re.compile(
     r"|Acompanhamento[\s\n]+TEA"
     r"|Surdez[\s\n]+Bilateral[\s\n]+Neurosensorial)[\s\n]*\((?:CID[\s\n]*-?[\s\n]*1[01]|CID)[:\s=-]*[A-Z0-9]\d{2}(?:\.\d{1,2})?\))"
 )
-# Suporta quebra de linha no rótulo ("CID-\n10: H90.3") e leitura `110` como `I10` no OCR
 RE_CID_MEDICAL = re.compile(
     r"(?i)\b(?:cid[\s\n]*-[\s\n]*1[01]|cid)[\s\n]*[:=-]?[\s\n]*"
     r"([A-TV-Z]\d{2}(?:\.\d{1,2})?|[A-Z0-9]\d{2}(?:\.\d{1,2})?(?=\)|\s|$|[,;])|(?=[0-9A-HJ-NP-Z]*\d)[0-9A-HJ-NP-Z]{4,6}(?:\.[0-9A-HJ-NP-Z]{1,2})?)\b"
@@ -238,7 +257,6 @@ RE_BIOMETRY_PHOTO_PLACEHOLDER = re.compile(
 )
 
 # 18. Menores de Idade e Dependentes (`MINOR_OR_DEPENDENT` - Art. 14, LGPD)
-# Nota: case-sensitive nos grupos de nome (Title Case, CAIXA ALTA e iniciais abreviadas `N.`)
 _NAME_WORD = r"[A-ZÁÉÍÓÚÂÊÔÃÕÇ][a-záéíóúâêôãõç'-]+"
 _UPPER_NAME_WORD = r"[A-ZÁÉÍÓÚÂÊÔÃÕÇ]{2,}"
 _ANY_CASE_NAME_TOKEN = r"(?:[A-ZÁÉÍÓÚÂÊÔÃÕÇ][a-záéíóúâêôãõç'-]+|[A-ZÁÉÍÓÚÂÊÔÃÕÇ]{2,}|[A-ZÁÉÍÓÚÂÊÔÃÕÇ]\.?)"
@@ -249,6 +267,9 @@ _FULL_NAME_PATTERN = (
 )
 _FLEX_NAME_PATTERN = (
     rf"({_ANY_CASE_NAME_TOKEN}(?:{_NAME_SEP}(?:{_NAME_PARTICLE}|{_ANY_CASE_NAME_TOKEN}(?![ \t]*[:=\d]))){{1,6}})"
+)
+_SAME_LINE_FLEX_NAME = (
+    rf"({_ANY_CASE_NAME_TOKEN}(?:[ \t]+(?:{_NAME_PARTICLE}|{_ANY_CASE_NAME_TOKEN}(?![ \t]*[:=\d]))){{1,6}})"
 )
 
 RE_DEPENDENT_NAMED = re.compile(
@@ -288,10 +309,21 @@ RE_FILIACAO_SECOND_PARENT = re.compile(
 RE_FILIACAO_COLON_SECOND_PARENT = re.compile(
     rf"(?i:\bf[ií]?l[ií]?a[cçg][aã]o[\s\n]*:[\s\n]*){_ANY_CASE_NAME_TOKEN}(?:[ \t]+(?:{_NAME_PARTICLE}|{_ANY_CASE_NAME_TOKEN})){{1,5}}(?i:[ \t]+e(?:[ \t]+de)?[\s\n]+){_FLEX_NAME_PATTERN}"
 )
+# Cédula de RG: nome da mãe na linha logo após `FILIACAO` (sem `:`)
+RE_FILIACAO_RG_NEXT_LINE = re.compile(
+    rf"(?i:\bf[ií]?l[ií]?a[cçg][aã]o[ \t]*\n[ \t]*){_SAME_LINE_FLEX_NAME}"
+)
 
-# 20. Data de Nascimento rotulada ("nasceu em", "nascido(a) em", "Data de Nascimento:", "Nasc.:", "dt. nasc.")
+# 20. Data de Nascimento rotulada (suporta ano 4 dígitos, 2 dígitos em cartão CPF e layout 2 colunas)
 RE_BIRTH_DATE = re.compile(
-    r"(?i)\b(?:data[\s\n]+(?:de[\s\n]+)?nascimento|dt\.?[\s\n]*nasc\.?|nascimento|nasceu[\s\n]+em|nascid[oa](?:\(a\))?(?:[\s\n]+em)?|nasc\.?)[\s\n]*[:=-]?[\s\n]*((?:0[1-9]|[12]\d|3[01])/(?:0[1-9]|1[0-2])/(?:19\d{2}|20[0-2]\d))\b"
+    r"(?i)\b(?:data[\s\n]+(?:d[eo][\s\n]+)?nascimento|dt\.?[\s\n]*nasc\.?|nascimento|nasceu[\s\n]+em|nascid[oa](?:\(a\))?(?:[\s\n]+em)?|nasc\.?)[\s\n]*[:=-]?[\s\n]*((?:0[1-9]|[12]\d|3[01])/(?:0[1-9]|1[0-2])/(?:19\d{2}|20[0-2]\d|\d{2}))\b"
+)
+RE_BIRTH_DATE_TWO_COL = re.compile(
+    r"(?i)\bdata[\s\n]+d[eo][\s\n]+nascimento[ \t]*\n[^\n]{4,24}\n[ \t]*((?:0[1-9]|[12]\d|3[01])/(?:0[1-9]|1[0-2])/(?:19\d{2}|20[0-2]\d|\d{2}))\b"
+)
+# Data de nascimento em verso de RG sem rótulo legível (ex.: `08/01/1948` antes de `MANAUS-AM` / `NATURALIDADE`)
+RE_BIRTH_DATE_RG_CONTEXTUAL = re.compile(
+    r"\b((?:0[1-9]|[12]\d|3[01])/(?:0[1-9]|1[0-2])/(?:19\d{2}|20[01]\d))\b"
 )
 
 
@@ -398,6 +430,13 @@ COMPILED_REGEX_SPECS: tuple[RegexPatternSpec, ...] = (
     RegexPatternSpec(
         entity_type="CEP",
         category=DataCategory.PERSONAL_COMMON,
+        pattern=RE_CEP_LABELED,
+        value_group=1,
+        base_confidence=0.91,
+    ),
+    RegexPatternSpec(
+        entity_type="CEP",
+        category=DataCategory.PERSONAL_COMMON,
         pattern=RE_CEP,
         value_group=1,
         base_confidence=0.86,
@@ -415,6 +454,13 @@ COMPILED_REGEX_SPECS: tuple[RegexPatternSpec, ...] = (
         pattern=RE_PHONE_BR,
         value_group=0,
         base_confidence=0.90,
+    ),
+    RegexPatternSpec(
+        entity_type="PHONE",
+        category=DataCategory.PERSONAL_COMMON,
+        pattern=RE_PHONE_PARTIAL_INTL,
+        value_group=1,
+        base_confidence=0.88,
     ),
     RegexPatternSpec(
         entity_type="EMAIL",
@@ -439,11 +485,41 @@ COMPILED_REGEX_SPECS: tuple[RegexPatternSpec, ...] = (
         base_confidence=0.94,
     ),
     RegexPatternSpec(
+        entity_type="MATRICULA_UFAM",
+        category=DataCategory.PERSONAL_COMMON,
+        pattern=RE_MATRICULA_TABLE_ROW,
+        value_group=1,
+        base_confidence=0.91,
+    ),
+    RegexPatternSpec(
+        entity_type="RG",
+        category=DataCategory.PERSONAL_COMMON,
+        pattern=RE_RG_CARD_CONTEXTUAL,
+        value_group=1,
+        base_confidence=0.89,
+        requires_context=True,
+    ),
+    RegexPatternSpec(
         entity_type="BIRTH_DATE",
         category=DataCategory.PERSONAL_COMMON,
         pattern=RE_BIRTH_DATE,
         value_group=1,
         base_confidence=0.92,
+    ),
+    RegexPatternSpec(
+        entity_type="BIRTH_DATE",
+        category=DataCategory.PERSONAL_COMMON,
+        pattern=RE_BIRTH_DATE_TWO_COL,
+        value_group=1,
+        base_confidence=0.91,
+    ),
+    RegexPatternSpec(
+        entity_type="BIRTH_DATE",
+        category=DataCategory.PERSONAL_COMMON,
+        pattern=RE_BIRTH_DATE_RG_CONTEXTUAL,
+        value_group=1,
+        base_confidence=0.88,
+        requires_context=True,
     ),
     RegexPatternSpec(
         entity_type="DEPENDENT_DATA",
@@ -509,6 +585,13 @@ COMPILED_REGEX_SPECS: tuple[RegexPatternSpec, ...] = (
         base_confidence=0.92,
     ),
     RegexPatternSpec(
+        entity_type="FILIACAO",
+        category=DataCategory.PERSONAL_COMMON,
+        pattern=RE_FILIACAO_RG_NEXT_LINE,
+        value_group=1,
+        base_confidence=0.91,
+    ),
+    RegexPatternSpec(
         entity_type="PROCESSO_SEI",
         category=DataCategory.PERSONAL_COMMON,
         pattern=RE_SEI_PROCESS,
@@ -517,6 +600,13 @@ COMPILED_REGEX_SPECS: tuple[RegexPatternSpec, ...] = (
         requires_context=True,
     ),
     # Categorias Financeiras e Bancárias -> SEMPRE FINANCIAL_BANKING (Nunca PERSONAL_SENSITIVE)
+    RegexPatternSpec(
+        entity_type="CREDIT_CARD",
+        category=DataCategory.FINANCIAL_BANKING,
+        pattern=RE_CREDIT_CARD,
+        value_group=1,
+        base_confidence=0.96,
+    ),
     RegexPatternSpec(
         entity_type="BANK_AGENCY",
         category=DataCategory.FINANCIAL_BANKING,
@@ -756,17 +846,21 @@ __all__ = [
     "RE_PIS_PASEP_FORMATTED",
     "RE_PIS_PASEP_LABELED",
     "RE_RG_LABELED",
+    "RE_RG_CARD_CONTEXTUAL",
     "RE_PASSPORT_LABELED",
     "RE_TITULO_ELEITOR_LABELED",
     "RE_TITULO_ELEITOR_STANDALONE",
     "RE_ADDRESS_LABELED",
+    "RE_CEP_LABELED",
     "RE_CEP",
     "RE_PHONE_LABELED",
     "RE_PHONE_BR",
+    "RE_PHONE_PARTIAL_INTL",
     "RE_EMAIL",
     "RE_SIAPE_LABELED",
     "RE_MATRICULA_UFAM",
     "RE_SEI_PROCESS",
+    "RE_CREDIT_CARD",
     "RE_BANK_AGENCY",
     "RE_BANK_OPERATION",
     "RE_BANK_ACCOUNT",
@@ -797,8 +891,11 @@ __all__ = [
     "RE_FILIACAO_FIRST_PARENT",
     "RE_FILIACAO_SECOND_PARENT",
     "RE_FILIACAO_COLON_SECOND_PARENT",
+    "RE_FILIACAO_RG_NEXT_LINE",
     "RE_RESIDENTIAL_ADDRESS",
     "RE_BIRTH_DATE",
+    "RE_BIRTH_DATE_TWO_COL",
+    "RE_BIRTH_DATE_RG_CONTEXTUAL",
     "validate_cnh",
     "validate_cnpj",
 ]

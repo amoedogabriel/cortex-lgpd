@@ -25,6 +25,7 @@ venv/
 coverage/
 test-results/
 playwright-report/
+frontend/e2e/screenshots/
 
 # Variáveis de ambiente e segredos locais
 .env

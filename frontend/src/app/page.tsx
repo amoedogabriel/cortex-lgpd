@@ -22,6 +22,7 @@ export default function HomePage() {
     activeDocId,
     activeDoc,
     activeVerboseLogs,
+    activeProcessingPage,
     activeStepNumber,
     showAddFilesDropzone,
     setShowAddFilesDropzone,
@@ -249,7 +250,9 @@ export default function HomePage() {
             documentProfile={activeDoc.documentProfile}
             processedPages={activeDoc.processedPages}
             totalPages={activeDoc.totalPages}
-            progressPercentage={activeDoc.progressPercent ?? 0}
+            progressPercentage={activeDoc.progressPercent}
+            currentProcessingPage={activeProcessingPage}
+            errorMessage={activeDoc.errorMessage}
             currentPage={activeDoc.currentPage}
             allOccurrences={activeDoc.occurrences}
             manualBoxes={activeDoc.manualBoxes}
@@ -271,6 +274,7 @@ export default function HomePage() {
             onSetGroupSelection={handleSetGroupSelection}
             onRemoveManualBox={handleRemoveManualBox}
             onOpenConfirmRedactionModal={handleOpenConfirmRedactionModal}
+            onRetryDocument={() => handleRetryDocument(activeDoc.clientId)}
           />
 
           <ExportAndReportModal

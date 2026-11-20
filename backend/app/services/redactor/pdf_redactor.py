@@ -152,6 +152,10 @@ def generate_masked_preview(entity_type: str, raw_value: str) -> str:
             return f"****-****-{compact[-4:]}"
         return "****-PIX-****"
 
+    if etype == "CREDIT_CARD":
+        last4 = digits[-4:] if len(digits) >= 4 else "****"
+        return f"**** **** **** {last4}"
+
     if etype == "REMUNERATION":
         return "R$ ***.***,**"
 

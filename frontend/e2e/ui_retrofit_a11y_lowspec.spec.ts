@@ -494,4 +494,279 @@ test.describe("Retrofit Visual SaaS — Acessibilidade WCAG 2.2 AA, Low-Spec GPU
       expect(wsOverflow).toBeLessThanOrEqual(1);
     }
   });
+
+  test("4. Recuperação automática de queda SSE em 22/25 + UI de progresso moderna sem redundância", async ({
+    page,
+  }) => {
+    const jobId = "job_sse_drop_25";
+    let occurrencesPollCount = 0;
+    let streamConnections = 0;
+
+    const buildPagesMap = (count: number) => {
+      const map: Record<string, Record<string, unknown>> = {};
+      for (let p = 1; p <= count; p += 1) {
+        map[String(p)] = {
+          page_number: p,
+          page_type: "SCANNED",
+          width_px: 1240,
+          height_px: 1754,
+          image_url: `/api/v1/documents/${jobId}/pages/${p}/image.webp`,
+          ocr_executed: true,
+          processing_time_ms: 120,
+          occurrences: [],
+        };
+      }
+      return map;
+    };
+
+    const baseOccurrences = [
+      {
+        id: "occ_drop_1",
+        page_number: 1,
+        entity_type: "CPF",
+        category: "PERSONAL_COMMON",
+        x0_norm: 0.12,
+        y0_norm: 0.14,
+        x1_norm: 0.36,
+        y1_norm: 0.18,
+        confidence_score: 0.99,
+        confidence_level: "HIGH",
+        group_id: "grp_drop_cpf",
+        detector_source: "REGEX",
+        selected: true,
+        action_mode: "BLACKOUT",
+        recommended_mode: "BLACKOUT",
+        masked_preview: "***.222.333-**",
+        preview_text: "111.222.333-44",
+      },
+      {
+        id: "occ_drop_2",
+        page_number: 2,
+        entity_type: "EMAIL",
+        category: "PERSONAL_COMMON",
+        x0_norm: 0.12,
+        y0_norm: 0.24,
+        x1_norm: 0.45,
+        y1_norm: 0.28,
+        confidence_score: 0.96,
+        confidence_level: "HIGH",
+        group_id: "grp_drop_email",
+        detector_source: "REGEX",
+        selected: true,
+        action_mode: "BLACKOUT",
+        recommended_mode: "BLACKOUT",
+        masked_preview: "t***@ufam.edu.br",
+        preview_text: "titular@ufam.edu.br",
+      },
+    ];
+
+    const finalOccurrence = {
+      id: "occ_drop_3",
+      page_number: 25,
+      entity_type: "RG",
+      category: "PERSONAL_COMMON",
+      x0_norm: 0.14,
+      y0_norm: 0.30,
+      x1_norm: 0.38,
+      y1_norm: 0.34,
+      confidence_score: 0.94,
+      confidence_level: "HIGH",
+      group_id: "grp_drop_rg",
+      detector_source: "REGEX",
+      selected: true,
+      action_mode: "BLACKOUT",
+      recommended_mode: "BLACKOUT",
+      masked_preview: "***.456-*",
+      preview_text: "1234567-0",
+    };
+
+    await page.route("**/api/v1/documents/upload**", async (route) => {
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          job_id: jobId,
+          status: "PARTIAL_REVIEW_READY",
+          document_profile: "RESTRICTED_PROCESS",
+          original_file_sha256: "f".repeat(64),
+          total_pages: 25,
+          processed_pages: 1,
+          first_page_ready: true,
+          stream_url: `/api/v1/documents/${jobId}/stream`,
+          occurrences_url: `/api/v1/documents/${jobId}/occurrences`,
+          verbose_logs: [
+            {
+              id: "drop_step_1",
+              sequence: 1,
+              step_number: 1,
+              stage: "ETAPA_1_INGESTAO",
+              stage_label: "1. Ingestão Segura",
+              level: "SUCCESS",
+              message: "PDF recebido com 25 páginas.",
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        }),
+      });
+    });
+
+    await page.route(`**/api/v1/documents/${jobId}/pages/*/image.webp`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "image/svg+xml",
+        body: MOCK_PAGE_SVG,
+      });
+    });
+
+    await page.route(`**/api/v1/documents/${jobId}/occurrences`, async (route) => {
+      occurrencesPollCount += 1;
+      // Primeiras 2 chamadas mantêm 22/25 para validar a UI de progresso em andamento;
+      // a partir da 3ª chamada (reconexão / polling de segurança), o worker concluiu 25/25.
+      const isCompletedNow = occurrencesPollCount >= 3;
+      const processed = isCompletedNow ? 25 : 22;
+      const occs = isCompletedNow
+        ? [...baseOccurrences, finalOccurrence]
+        : baseOccurrences;
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          job_id: jobId,
+          status: isCompletedNow ? "AWAITING_REVIEW" : "PARTIAL_REVIEW_READY",
+          document_profile: "RESTRICTED_PROCESS",
+          original_file_sha256: "f".repeat(64),
+          total_pages: 25,
+          processed_pages: processed,
+          pages: buildPagesMap(processed),
+          occurrences: occs,
+          verbose_logs: [
+            {
+              id: "drop_step_1",
+              sequence: 1,
+              step_number: 1,
+              stage: "ETAPA_1_INGESTAO",
+              stage_label: "1. Ingestão Segura",
+              level: "SUCCESS",
+              message: "PDF recebido com 25 páginas.",
+              timestamp: new Date().toISOString(),
+            },
+            {
+              id: "drop_step_3",
+              sequence: 2,
+              step_number: 3,
+              stage: "ETAPA_3_DETECCAO_LGPD",
+              stage_label: "3. Detecção PII",
+              level: "INFO",
+              message: isCompletedNow
+                ? "Análise concluída em todas as 25 páginas."
+                : "Processando OCR/IA da página 23.",
+              details: { page_number: isCompletedNow ? 25 : 23 },
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        }),
+      });
+    });
+
+    await page.route(`**/api/v1/documents/${jobId}/stream`, async (route) => {
+      streamConnections += 1;
+      if (streamConnections === 1) {
+        // Simula queda prematura do SSE exatamente em 22/25 (sem analysis_complete)
+        const partialSse =
+          `event: progress\n` +
+          `data: ${JSON.stringify({
+            event: "progress",
+            job_id: jobId,
+            timestamp: new Date().toISOString(),
+            data: {
+              processed_pages: 22,
+              total_pages: 25,
+              percentage: 88,
+              status: "PARTIAL_REVIEW_READY",
+            },
+          })}\n\n`;
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+          },
+          body: partialSse,
+        });
+        return;
+      }
+
+      // Na reconexão SSE, backend envia analysis_complete 25/25
+      const completeSse =
+        `event: analysis_complete\n` +
+        `data: ${JSON.stringify({
+          event: "analysis_complete",
+          job_id: jobId,
+          timestamp: new Date().toISOString(),
+          data: {
+            status: "AWAITING_REVIEW",
+            document_profile: "RESTRICTED_PROCESS",
+            total_pages: 25,
+            total_occurrences: 3,
+          },
+        })}\n\n`;
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+        },
+        body: completeSse,
+      });
+    });
+
+    await page.goto("/");
+    await page.getByTestId("pdf-file-input").setInputFiles({
+      name: "processo_25_paginas.pdf",
+      mimeType: "application/pdf",
+      buffer: SAMPLE_PDF_BUFFER,
+    });
+
+    // 1. Verifica estado de progresso em 22/25 (antes da recuperação)
+    const progressBanner = page.getByTestId("sidebar-sse-progress-banner");
+    await expect(progressBanner).toBeVisible({ timeout: 10000 });
+    await expect(progressBanner).toContainText("ANALISANDO DOCUMENTO");
+    await expect(page.getByTestId("processing-progress-percent")).toHaveText("88%");
+    await expect(page.getByTestId("processing-pages-summary")).toContainText(
+      "22 de 25 páginas processadas"
+    );
+    await expect(page.getByTestId("processing-current-page")).toContainText(
+      "Processando página 23..."
+    );
+
+    // CTA desabilitado de forma limpa (sem repetir contador redundante 22/25)
+    const ctaBtn = page.getByTestId("open-confirm-redaction-modal-btn");
+    await expect(ctaBtn).toBeDisabled();
+    await expect(ctaBtn).toContainText("Aguardando conclusão da análise...");
+
+    // Regra anti-redundância: card ativo compacto não duplica texto "Etapa 4/6"
+    const activeCard = page.getByRole("article", {
+      name: /Progresso do documento processo_25_paginas\.pdf/i,
+    });
+    await expect(activeCard).not.toContainText("Etapa 4/6");
+    await expect(activeCard.getByRole("progressbar")).toBeVisible();
+
+    // 2. Aguarda recuperação automática via reconexão SSE + snapshot polling (sem refresh manual!)
+    await expect(progressBanner).toContainText("ANÁLISE CONCLUÍDA", {
+      timeout: 10000,
+    });
+    await expect(progressBanner).toContainText("AWAITING_REVIEW");
+    await expect(page.getByTestId("processing-progress-percent")).toHaveText("100%");
+    await expect(page.getByTestId("processing-pages-summary")).toContainText(
+      "25 de 25 páginas prontas para conferência final."
+    );
+
+    // CTA liberado automaticamente com o total consolidado de 3 tarjas
+    await expect(ctaBtn).toBeEnabled();
+    await expect(ctaBtn).toContainText("Aplicar Tarjamento Definitivo (3 tarjas)");
+
+    // Conformidade Low-Spec GPU preservada
+    await assertLowSpecGpuCompliance(page);
+  });
 });

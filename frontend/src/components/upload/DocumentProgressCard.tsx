@@ -104,8 +104,13 @@ export function DocumentProgressCard({
       : `${clampedPercent}%`
     : "Processamento em andamento...";
 
-  // Progressive disclosure: oculta mini-pipeline redundante quando já pronto no workspace
-  const showMiniPipeline = !(compact && (isWaitingHumanReview || isDone));
+  // Regra anti-redundância: quando o documento está ativo no workspace compacto,
+  // o painel lateral já concentra o monitor de progresso principal.
+  const isCompactActiveWorkspaceCard = compact && isActive;
+  const showDetailedProgressCopy = !isCompactActiveWorkspaceCard;
+  const showMiniPipeline = !(
+    compact && (isActive || isWaitingHumanReview || isDone)
+  );
 
   return (
     <article
@@ -229,8 +234,13 @@ export function DocumentProgressCard({
         </div>
       </div>
 
-      {/* Linha 2: Barra de Progresso Fina + Resumo Honesto de Etapa/Páginas */}
-      <div className="mt-2.5 flex flex-wrap items-center gap-3">
+      {/* Linha 2: Barra de Progresso (discreta quando ativo no workspace para evitar redundância) */}
+      <div
+        className={cn(
+          "flex flex-wrap items-center gap-3",
+          isCompactActiveWorkspaceCard ? "mt-2" : "mt-2.5"
+        )}
+      >
         <div
           role="progressbar"
           aria-valuemin={0}
@@ -239,13 +249,16 @@ export function DocumentProgressCard({
             isDeterminate && clampedPercent !== null ? clampedPercent : undefined
           }
           aria-valuetext={activeStageText}
-          className="h-1.5 min-w-[120px] flex-1 overflow-hidden rounded-full bg-surface-canvas"
+          className={cn(
+            "min-w-[120px] flex-1 overflow-hidden rounded-full bg-surface-canvas",
+            isCompactActiveWorkspaceCard ? "h-1" : "h-1.5"
+          )}
         >
           {isError ? (
             <div className="h-full w-full rounded-full bg-red-600" />
           ) : isDeterminate && clampedPercent !== null ? (
             <div
-              className="h-full rounded-full bg-brand-primary transition-[width] duration-150"
+              className="h-full rounded-full bg-brand-primary transition-[width] duration-300 ease-out"
               style={{ width: `${clampedPercent}%` }}
             />
           ) : (
@@ -253,27 +266,29 @@ export function DocumentProgressCard({
           )}
         </div>
 
-        <div
-          className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-muted"
-          aria-live="polite"
-        >
-          <span
-            className={cn(
-              "font-medium",
-              isError
-                ? "text-red-800"
-                : isDone
-                ? "text-brand-ink"
-                : "text-ink-secondary"
-            )}
+        {showDetailedProgressCopy && (
+          <div
+            className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-muted"
+            aria-live="polite"
           >
-            Etapa {item.stageNumber}/6: {activeStageText}
-          </span>
-          <span aria-hidden="true">•</span>
-          <span className="font-mono tabular-nums text-ink-muted">
-            {progressSummaryText}
-          </span>
-        </div>
+            <span
+              className={cn(
+                "font-medium",
+                isError
+                  ? "text-red-800"
+                  : isDone
+                  ? "text-brand-ink"
+                  : "text-ink-secondary"
+              )}
+            >
+              Etapa {item.stageNumber}/6: {activeStageText}
+            </span>
+            <span aria-hidden="true">•</span>
+            <span className="font-mono tabular-nums text-ink-muted">
+              {progressSummaryText}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Mini-Pipeline das 6 Etapas (exibida durante processamento ativo) */}

@@ -28,6 +28,8 @@ from app.core.ml_models import ml_registry
 from app.models.enums import DataCategory, RedactionActionMode
 from app.services.pdf_extractor.extractor import ExtractedTableCell, UnifiedToken
 from app.services.pii_detector.context_filter import (
+    has_rg_birth_date_context,
+    has_rg_card_context,
     is_false_positive_institutional_text,
     should_suppress_detection,
 )
@@ -77,6 +79,17 @@ _NEXT_LINE_CONT_RE = re.compile(
 )
 
 _PERSON_ENTITY_TYPES: frozenset[str] = frozenset({"PERSON_NAME", "DEPENDENT_DATA", "FILIACAO"})
+_GLUED_EMAIL_PREFIX_RE = re.compile(
+    r"(?i)^(?:endere[cçg]o[\s_.-]*eletr[oô]nico|correio[\s_.-]*eletr[oô]nico|e-?mail|eletr[oô]nico|contato)[:=-]?"
+)
+_ACCENT_CHAR_CLASS: dict[str, str] = {
+    "a": "[aáàâãä]",
+    "e": "[eéèêë]",
+    "i": "[iíìîï]",
+    "o": "[oóòôõö]",
+    "u": "[uúùûü]",
+    "c": "[cç]",
+}
 
 _NON_PERSON_LINE_STOPWORDS: frozenset[str] = frozenset(
     {
@@ -364,6 +377,70 @@ _NON_PERSON_LINE_STOPWORDS: frozenset[str] = frozenset(
         "transtorno",
         "deficiencia",
         "reacao",
+        # Rótulos de RG / Judiciário / Faturas que não podem ser absorvidos como nomes
+        "nome",
+        "naturalidade",
+        "polegar",
+        "direito",
+        "esquerdo",
+        "juntada",
+        "peticao",
+        "depeticao",
+        "deinicial",
+        "inicial",
+        "distribuicao",
+        "vossa",
+        "excelencia",
+        "requerido",
+        "requerida",
+        "cert",
+        "niss",
+        "visa",
+        "platinum",
+        "parcelamento",
+        "parcolamento",
+        "taxas",
+        "mensais",
+        "mensals",
+        "cobranca",
+        "iof",
+        "fatura",
+        "faturas",
+        "supermerc",
+        "nucleo",
+        "cidade",
+        "deus",
+        "maues",
+        "comarca",
+        "juizado",
+        "projudi",
+        "tjam",
+        "expedicao",
+        "maior",
+        "deanos",
+        "ltda",
+        "ambiental",
+        "saneamento",
+        "identidade",
+        "carteira",
+        "territorio",
+        "nacional",
+        "relacao",
+        "diretor",
+        "diretora",
+        "diretorade",
+        "secretaria",
+        "polo",
+        "passivo",
+        "ativo",
+        "polopassivo",
+        "poloativo",
+        "avenida",
+        "rua",
+        "travessa",
+        "alameda",
+        "estrada",
+        "manaus",
     }
 )
 
@@ -864,6 +941,16 @@ def _extract_table_aware_spans_for_page(
                         continue
                     if spec.validator is not None and not spec.validator(val):
                         continue
+                    cell_m_start = match.start(grp)
+                    cell_m_end = match.end(grp)
+                    if spec.entity_type == "EMAIL":
+                        val, cell_m_start, cell_m_end = _strip_glued_email_prefix(val, cell_m_start, cell_m_end)
+                    if spec.requires_context and spec.entity_type == "RG":
+                        if not has_rg_card_context(val_clean, cell_m_start, cell_m_end):
+                            continue
+                    if spec.requires_context and spec.entity_type == "BIRTH_DATE":
+                        if not has_rg_birth_date_context(val_clean, cell_m_start, cell_m_end):
+                            continue
                     if spec.entity_type == "PERSON_NAME":
                         val = _trim_person_text_only(val)
                         if not val:
@@ -896,8 +983,8 @@ def _extract_table_aware_spans_for_page(
                         entity_type=spec.entity_type,
                         category=spec.category,
                         matched_text=val,
-                        match_start=match.start(grp),
-                        match_end=match.end(grp),
+                        match_start=cell_m_start,
+                        match_end=cell_m_end,
                         confidence=spec.base_confidence,
                         detector_source="CUSTOM_REGEX" if spec.is_custom else "REGEX",
                         existing_detections=existing_detections,
@@ -1157,6 +1244,52 @@ def _trim_person_text_only(raw_text: str) -> str:
     return "\n".join(kept).strip()
 
 
+def _strip_glued_email_prefix(val: str, start_char: int, end_char: int) -> tuple[str, int, int]:
+    """Remove rótulos colados por OCR no início de um e-mail (ex.: `enderecoeletronicomarcilio@...`)."""
+    m_pref = _GLUED_EMAIL_PREFIX_RE.match(val)
+    if m_pref:
+        remainder = val[m_pref.end() :]
+        if "@" in remainder and remainder.find("@") >= 2:
+            return remainder, start_char + m_pref.end(), end_char
+    return val, start_char, end_char
+
+
+def _accent_insensitive_regex(token: str) -> str:
+    """Converte um token em regex tolerante a acentuação para propagação entre páginas OCR."""
+    norm = _norm_ascii_lower(token)
+    parts: list[str] = []
+    for ch in norm:
+        if ch in _ACCENT_CHAR_CLASS:
+            parts.append(_ACCENT_CHAR_CLASS[ch])
+        else:
+            parts.append(re.escape(ch))
+    return "".join(parts)
+
+
+def _within_ocr_edit_distance(a: str, b: str, max_edits: int = 1) -> bool:
+    """Retorna True se duas strings ASCII normalizadas diferirem por no máximo `max_edits` edições."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > max_edits:
+        return False
+    if max_edits <= 0:
+        return False
+    if len(a) == len(b):
+        return sum(1 for c1, c2 in zip(a, b) if c1 != c2) <= max_edits
+    shorter, longer = (a, b) if len(a) < len(b) else (b, a)
+    i = j = diffs = 0
+    while i < len(shorter) and j < len(longer):
+        if shorter[i] == longer[j]:
+            i += 1
+            j += 1
+        else:
+            diffs += 1
+            if diffs > max_edits:
+                return False
+            j += 1
+    return True
+
+
 def _extract_regex_spans_for_page(
     page_number: int,
     full_text: str,
@@ -1189,6 +1322,16 @@ def _extract_regex_spans_for_page(
 
             if spec.entity_type in ("PERSON_NAME", "DEPENDENT_DATA", "FILIACAO"):
                 start_char, end_char, val = _trim_person_stopwords(val, start_char, end_char)
+
+            if spec.entity_type == "EMAIL":
+                val, start_char, end_char = _strip_glued_email_prefix(val, start_char, end_char)
+
+            if spec.requires_context and spec.entity_type == "RG":
+                if not has_rg_card_context(full_text, start_char, end_char):
+                    continue
+            if spec.requires_context and spec.entity_type == "BIRTH_DATE":
+                if not has_rg_birth_date_context(full_text, start_char, end_char):
+                    continue
 
             if spec.validator is not None and not spec.validator(val):
                 continue
@@ -1537,10 +1680,11 @@ def propagate_person_names_across_batch(
     )
 
     compiled_candidates: list[tuple[re.Pattern[str], str, DataCategory, float]] = []
+    fuzzy_candidates: list[tuple[re.Pattern[str], str, str, DataCategory, float]] = []
     for tokens, etype, cat, conf in ordered_candidates:
         compiled_candidates.append(
             (
-                re.compile(r"(?i)\b" + r"[\s\n]+".join(re.escape(t) for t in tokens) + r"\b"),
+                re.compile(r"(?i)\b" + r"[\s\n]+".join(_accent_insensitive_regex(t) for t in tokens) + r"\b"),
                 etype,
                 cat,
                 conf,
@@ -1552,10 +1696,10 @@ def propagate_person_names_across_batch(
             abbr_parts: list[str] = []
             for idx_t, t in enumerate(tokens):
                 if _NAME_PARTICLE_RE.match(t) or idx_t == first_i or idx_t == last_i:
-                    abbr_parts.append(re.escape(t))
+                    abbr_parts.append(_accent_insensitive_regex(t))
                 else:
                     clean_t = t.rstrip(".")
-                    abbr_parts.append(rf"(?:{re.escape(clean_t)}|{re.escape(clean_t[0])}\.)")
+                    abbr_parts.append(rf"(?:{_accent_insensitive_regex(clean_t)}|{_accent_insensitive_regex(clean_t[0])}\.)")
             compiled_candidates.append(
                 (
                     re.compile(r"(?i)\b" + r"[\s\n]+".join(abbr_parts) + r"\b"),
@@ -1564,17 +1708,38 @@ def propagate_person_names_across_batch(
                     conf,
                 )
             )
+            # Propagação tolerante a espaços colados (`Americo deCastroBraga`, `EdsonAraujodaSilva`)
+            # e 1 erro de OCR em tokens intermediários (`AMERICO DE CASTRD BRAGA`)
+            first_tok = tokens[first_i]
+            last_tok = tokens[last_i]
+            if len(first_tok) >= 4 and len(last_tok) >= 4:
+                compact_target = re.sub(r"[^a-z]", "", _norm_ascii_lower("".join(tokens)))
+                mid_len = sum(len(t) for t in tokens[first_i + 1 : last_i])
+                max_mid = min(48, mid_len + len(tokens) * 3 + 4)
+                fuzzy_re = re.compile(
+                    rf"(?i)\b{_accent_insensitive_regex(first_tok)}"
+                    rf"[A-Za-zÁÉÍÓÚÂÊÔÃÕÇáéíóúâêôãõç \t\n]{{0,{max_mid}}}"
+                    rf"{_accent_insensitive_regex(last_tok)}\b"
+                )
+                fuzzy_candidates.append((fuzzy_re, compact_target, etype, cat, conf))
 
     for page_num, full_text, table_cells in pages_payload:
         page_dets = results_by_page.setdefault(page_num, [])
 
         if full_text:
+            known_person_spans: set[tuple[int, int]] = {
+                (d.start_char, d.end_char)
+                for d in page_dets
+                if d.entity_type in _PERSON_ENTITY_TYPES
+            }
             for pattern, etype, cat, conf in compiled_candidates:
                 for match in pattern.finditer(full_text):
+                    s_c, e_c = match.span(0)
+                    if (s_c, e_c) in known_person_spans:
+                        continue
                     matched_val = match.group(0).strip()
                     if not matched_val or is_false_positive_institutional_text(matched_val):
                         continue
-                    s_c, e_c = match.span(0)
                     det = RawTextSpanDetection(
                         page_number=page_num,
                         entity_type=etype,
@@ -1586,6 +1751,32 @@ def propagate_person_names_across_batch(
                         detector_source="SPACY_NLP",
                     )
                     _upsert_person_or_span_detection(page_dets, det, allow_replace_shorter_person=True)
+                    known_person_spans.add((s_c, e_c))
+
+            for f_pattern, compact_target, etype, cat, conf in fuzzy_candidates:
+                max_edits = 1 if len(compact_target) >= 12 else 0
+                for match in f_pattern.finditer(full_text):
+                    s_c, e_c = match.span(0)
+                    if (s_c, e_c) in known_person_spans:
+                        continue
+                    matched_val = match.group(0).strip()
+                    if not matched_val or "\n\n" in matched_val or is_false_positive_institutional_text(matched_val):
+                        continue
+                    compact_cand = re.sub(r"[^a-z]", "", _norm_ascii_lower(matched_val))
+                    if not _within_ocr_edit_distance(compact_cand, compact_target, max_edits=max_edits):
+                        continue
+                    det = RawTextSpanDetection(
+                        page_number=page_num,
+                        entity_type=etype,
+                        category=cat,
+                        matched_text=matched_val,
+                        start_char=s_c,
+                        end_char=e_c,
+                        confidence=round(min(conf, 0.90), 4),
+                        detector_source="SPACY_NLP",
+                    )
+                    _upsert_person_or_span_detection(page_dets, det, allow_replace_shorter_person=True)
+                    known_person_spans.add((s_c, e_c))
 
         if table_cells and full_text:
             for cell in table_cells:

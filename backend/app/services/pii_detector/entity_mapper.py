@@ -66,6 +66,7 @@ _NUMERIC_CANONICAL_TYPES: frozenset[str] = frozenset(
         "SIAPE",
         "MATRICULA_UFAM",
         "PROCESSO_SEI",
+        "CREDIT_CARD",
         "BANK_AGENCY",
         "BANK_OPERATION",
         "BANK_ACCOUNT",
@@ -208,32 +209,81 @@ def _person_abbreviated_matches_full(abbr_tokens: list[str], full_tokens: list[s
 
 def build_person_canonical_map(raw_names: list[str]) -> dict[str, str]:
     """
-    Mapeia variações abreviadas de nomes (`Roberto Carlos N. da Silva`) para a forma completa
-    correspondente (`ROBERTO CARLOS NOGUEIRA DA SILVA`) quando ambas coexistem no documento.
+    Mapeia variações abreviadas de nomes (`Roberto Carlos N. da Silva`), erros de 1 caractere
+    de OCR (`AMERICO DE CASTRD BRAGA`) e colagens sem espaço (`Americo deCastroBraga`)
+    para a forma completa canônica correspondente quando ambas coexistem no documento.
     """
+    norm_counts: dict[str, int] = {}
+    first_idx: dict[str, int] = {}
+    unique_all_norms: list[str] = []
     unique_norms: dict[str, list[str]] = {}
     for rn in raw_names:
         norm = _normalize_ascii_upper_space(rn)
-        if not norm or norm in unique_norms:
+        if not norm:
             continue
-        toks = _person_non_particle_tokens(rn)
-        if len(toks) >= 2:
-            unique_norms[norm] = toks
+        if norm not in norm_counts:
+            norm_counts[norm] = 1
+            first_idx[norm] = len(unique_all_norms)
+            unique_all_norms.append(norm)
+            toks = _person_non_particle_tokens(rn)
+            if len(toks) >= 2:
+                unique_norms[norm] = toks
+        else:
+            norm_counts[norm] += 1
 
     full_candidates = [
         (norm, toks)
         for norm, toks in unique_norms.items()
         if len(toks) >= 3 and all(not t.endswith(".") and len(t) >= 2 for t in toks)
     ]
-    full_candidates.sort(key=lambda item: (-len(item[1]), -len(item[0])))
+    full_candidates.sort(
+        key=lambda item: (-len(item[1]), -norm_counts.get(item[0], 0), -len(item[0]), first_idx.get(item[0], 0))
+    )
+    full_rank = {norm: idx for idx, (norm, _) in enumerate(full_candidates)}
 
     canonical_map: dict[str, str] = {}
     for norm, toks in unique_norms.items():
         has_abbr = any(t.endswith(".") or len(t) == 1 for t in toks)
-        for full_norm, full_toks in full_candidates:
+        norm_rank = full_rank.get(norm, len(full_candidates) + 1)
+        for idx, (full_norm, full_toks) in enumerate(full_candidates):
             if full_norm == norm:
                 continue
             if (has_abbr or len(toks) < len(full_toks)) and _person_abbreviated_matches_full(toks, full_toks):
+                canonical_map[norm] = full_norm
+                break
+            # Unifica variantes com 1 erro de OCR apenas em direção ao candidato de maior precedência
+            if (
+                idx < norm_rank
+                and len(toks) == len(full_toks)
+                and all(_tokens_equal_or_ocr_typo(t1, t2) for t1, t2 in zip(toks, full_toks))
+            ):
+                canonical_map[norm] = full_norm
+                break
+
+    for key in list(canonical_map.keys()):
+        target = canonical_map[key]
+        seen = {key}
+        while target in canonical_map and target not in seen:
+            seen.add(target)
+            target = canonical_map[target]
+        canonical_map[key] = target
+
+    compact_fulls = [
+        (full_norm, re.sub(r"[^A-Z]", "", full_norm))
+        for full_norm, _ in full_candidates
+        if full_norm not in canonical_map
+    ]
+    # Unifica também colagens de OCR (ex.: `EdsonAraujodaSilva`, `Americo deCastroBraga`)
+    for norm in unique_all_norms:
+        if norm in canonical_map:
+            continue
+        compact_norm = re.sub(r"[^A-Z]", "", norm)
+        if len(compact_norm) < 10:
+            continue
+        for full_norm, compact_full in compact_fulls:
+            if full_norm == norm:
+                continue
+            if _tokens_equal_or_ocr_typo(compact_norm, compact_full):
                 canonical_map[norm] = full_norm
                 break
     return canonical_map

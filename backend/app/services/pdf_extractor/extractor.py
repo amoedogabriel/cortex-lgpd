@@ -4,15 +4,17 @@ Analisador Posicional por Página e OCR Seletivo (`extractor.py`).
 Requisitos implementados:
 1. Extração página por página (`extract_single_page`) preparando o terreno para streaming SSE/WebSocket;
 2. Classificação de cada página como `TEXTUAL`, `SCANNED` ou `HYBRID` (Zero-Waste OCR: jamais executa
-   OCR em páginas 100% textuais sem imagens relevantes maiores que 100x50px);
+   OCR em páginas 100% textuais sem imagens relevantes maiores que 100x50px, mas detecta PDFs de texto
+   vetorizado como `Microsoft: Print To PDF` que têm 0 palavras nativas e glifos desenhados como vetores);
 3. Em páginas `TEXTUAL`, extrai palavras, linhas e estruturas de tabelas diretamente via `PyMuPDF`
    em milissegundos, preservando a relação cabeçalho-célula (`header_label`) tanto para tabelas com
    retângulos explícitos quanto para tabelas desenhadas com linhas de grade (`GRID`);
 4. Em páginas `SCANNED` ou regiões de imagem de páginas `HYBRID`, executa OCR ONNX a 200 DPI
-   (com fallback a 300 DPI se confiança média < 0.70);
-5. Identifica caixas delimitadoras de assinaturas visuais/manuscritas (`VISUAL_SIGNATURE`) e
-   fotografias 3x4/faciais (`FACIAL_PHOTO`) por análise geométrica de imagens embutidas,
-   âncoras OCR (`FOTO 3x4` / `FOTO 3X4 ESCANEADA`) e varredura de molduras/contornos 3x4 em scans;
+   (com fallback a 300 DPI se confiança média < 0.70 e resgate cirúrgico por linha via Tesseract);
+5. Identifica caixas delimitadoras de assinaturas visuais/manuscritas (`VISUAL_SIGNATURE`),
+   fotografias 3x4/faciais e biometria digital (`FACIAL_PHOTO`) por análise geométrica de imagens
+   embutidas (protegendo brasões e cabeçalhos institucionais), âncoras OCR (`FOTO 3x4`, `POLEGAR DIREITO`,
+   `Ciente ...`), e varredura filtrada de molduras/contornos 3x4 sem texto impresso interno;
 6. Converte todas as coordenadas para o padrão normalizado `[x0_norm, y0_norm, x1_norm, y1_norm]`
    no intervalo `[0.0, 1.0]`.
 """
@@ -37,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 MIN_RELEVANT_IMAGE_WIDTH_PX: int = 100
 MIN_RELEVANT_IMAGE_HEIGHT_PX: int = 50
+MIN_VECTOR_DRAWINGS_FOR_OUTLINED_TEXT: int = 15
 
 _UNDERSCORE_SIGNATURE_LINE_RE = re.compile(r"_{6,}")
 _STRICT_SIGNATURE_LABEL_RE = re.compile(
@@ -44,6 +47,24 @@ _STRICT_SIGNATURE_LABEL_RE = re.compile(
 )
 _PHOTO_ANCHOR_RE = re.compile(
     r"(?i)\b(foto\s*3\s*[x×*]?\s*4(?:\s+escanead[ao])?|fotografia\s+3\s*[x×*]?\s*4|identifica[cçg][aã]o\s+visual)\b"
+)
+_POLEGAR_ANCHOR_RE = re.compile(
+    r"(?i)\b(polegar\s+(?:direito|esquerdo)|impress[aã]o\s+digital)\b"
+)
+_ID_CARD_ANCHOR_RE = re.compile(
+    r"(?i)\b(carteira\s+de\s*identidade|registro\s+geral|polegar\s+(?:direito|esquerdo)|assinatura\s+do\s+titular)\b"
+)
+_CIENTE_SIGNATURE_RE = re.compile(
+    r"(?i)\bciente.{0,45}(?:19|20)\d{2}\b"
+)
+_NON_PORTRAIT_DOC_RE = re.compile(
+    r"(?i)(?:(?:fatura|vencimento|total\s+da\s+fatura|total\s+a\s+pagar|limite\s+de\s+cr[eé]dito|banco\s+bradesco|visa\s*platinum|hidr[oô]metro|nota\s+fiscal)"
+    r"|(?:\bmensagem\b.{0,240}\b(?:bom\s+dia|boa\s+tarde|boa\s+noite|obrigad[oa])\b))"
+)
+_INSTITUTIONAL_HEADER_TEXT_RE = re.compile(
+    r"(?i)(?:poder\s*judici[aá]rio|estado\s*do\s*amazonas|tribunal\s*de\s*justi[cç]a|"
+    r"rep[uú]blica\s*federativa|minist[eé]rio|universidade\s*federal|juizado\s*especial|"
+    r"comarca\s*de|projudi|prefeitura|governo\s*do\s*estado|termo\s*de\s*apresenta[cç][aã]o)"
 )
 
 
@@ -227,14 +248,18 @@ def _collect_relevant_image_regions(page: fitz.Page) -> list[_ImageRegionInfo]:
 def classify_page_type(
     native_word_count: int,
     relevant_images: list[_ImageRegionInfo],
+    vector_drawing_count: int = 0,
 ) -> PageContentType:
     """
     Classifica a página em `TEXTUAL`, `SCANNED` ou `HYBRID` aplicando a regra Zero-Waste OCR:
-    - Sem imagens relevantes (>100x50px) e com palavras nativas -> `TEXTUAL` (Zero OCR)
+    - Sem imagens relevantes (>100x50px) e com palavras nativas (ou página realmente em branco) -> `TEXTUAL` (Zero OCR)
+    - Sem palavras nativas (< 5) mas com glifos vetorizados (`vector_drawing_count >= 15`, ex.: Microsoft Print To PDF) -> `SCANNED`
     - Sem palavras nativas (ou < 5 palavras isoladas) e com imagem relevante -> `SCANNED`
     - Com texto nativo significativo E imagens relevantes (>100x50px) -> `HYBRID`
     """
     if not relevant_images:
+        if native_word_count < 5 and vector_drawing_count >= MIN_VECTOR_DRAWINGS_FOR_OUTLINED_TEXT:
+            return PageContentType.SCANNED
         return PageContentType.TEXTUAL
 
     total_img_coverage = sum(img.coverage_ratio for img in relevant_images)
@@ -542,6 +567,33 @@ def _boxes_overlap_norm(
     return (inter / min(area_a, area_b)) >= iou_threshold
 
 
+def _tokens_inside_norm_rect(
+    tokens: list[UnifiedToken] | None,
+    x0_n: float,
+    y0_n: float,
+    x1_n: float,
+    y1_n: float,
+    *,
+    inset: float = 0.0,
+) -> list[UnifiedToken]:
+    """Retorna tokens cujo centro geométrico está contido no retângulo normalizado."""
+    if not tokens:
+        return []
+    ix0 = x0_n + inset
+    iy0 = y0_n + inset
+    ix1 = x1_n - inset
+    iy1 = y1_n - inset
+    if ix1 <= ix0 or iy1 <= iy0:
+        return []
+    inside: list[UnifiedToken] = []
+    for t in tokens:
+        cx = 0.5 * (t.x0_norm + t.x1_norm)
+        cy = 0.5 * (t.y0_norm + t.y1_norm)
+        if ix0 <= cx <= ix1 and iy0 <= cy <= iy1:
+            inside.append(t)
+    return inside
+
+
 def _find_anchor_photo_frame(
     arr: np.ndarray,
     ln: UnifiedLine,
@@ -646,10 +698,14 @@ def _find_anchor_photo_frame(
 def _scan_unanchored_portrait_frames(
     arr: np.ndarray,
     existing_boxes: list[tuple[float, float, float, float]],
+    *,
+    tokens: list[UnifiedToken] | None = None,
+    max_candidates: int = 2,
 ) -> list[tuple[float, float, float, float, float, str]]:
     """
     Varre a página escaneada em busca de molduras retangulares verticais 3x4 (`w_norm` entre 0.08 e 0.20,
     razão de aspecto entre 0.65 e 0.85 e conteúdo interno não vazio) mesmo sem legenda OCR explícita.
+    Rejeita células de tabela/fatura contendo texto impresso interno e bordas laterais de scanner.
     """
     h_px, w_px = arr.shape
     dark = arr < 180
@@ -667,8 +723,6 @@ def _scan_unanchored_portrait_frames(
     ys_e, xs_e = np.where(diffs == -1)
 
     for y, x0, x1 in zip(ys_s, xs_s, xs_e):
-        if y != ys_e[0] if False else False:
-            pass
         seg_w = int(x1 - x0)
         if min_w_px <= seg_w <= max_w_px:
             h_segments.append((int(y), int(x0), int(x1)))
@@ -689,7 +743,7 @@ def _scan_unanchored_portrait_frames(
         dedup_segs.append(seg)
 
     tol_x = max(5, int(0.014 * w_px))
-    found: list[tuple[float, float, float, float, float, str]] = []
+    scored_candidates: list[tuple[float, tuple[float, float, float, float]]] = []
 
     for i, (y_top, tx0, tx1) in enumerate(dedup_segs):
         for y_bot, bx0, bx1 in dedup_segs[i + 1 :]:
@@ -698,9 +752,9 @@ def _scan_unanchored_portrait_frames(
             if bh <= 0:
                 continue
             aspect = bw / bh
-            if aspect < 0.60:
+            if aspect < 0.62:
                 break
-            if aspect > 0.90:
+            if aspect > 0.88:
                 continue
             if abs(tx0 - bx0) > tol_x or abs(tx1 - bx1) > tol_x:
                 continue
@@ -710,28 +764,149 @@ def _scan_unanchored_portrait_frames(
             if not (min_w_px <= (x1 - x0) <= max_w_px):
                 continue
 
-            left_cov = float(dark[y_top : y_bot + 1, max(0, x0 - 2) : min(w_px, x0 + 3)].any(axis=1).mean())
-            right_cov = float(dark[y_top : y_bot + 1, max(0, x1 - 2) : min(w_px, x1 + 3)].any(axis=1).mean())
-            if left_cov < 0.55 or right_cov < 0.55:
-                continue
-
-            interior = arr[y_top + 4 : max(y_top + 5, y_bot - 4), x0 + 4 : max(x0 + 5, x1 - 4)]
-            if interior.size == 0 or float(interior.std()) <= 12.0:
-                continue
-
             cand_norm = (
                 _clamp_norm(x0 / w_px),
                 _clamp_norm(y_top / h_px),
                 _clamp_norm((x1 + 1) / w_px),
                 _clamp_norm((y_bot + 1) / h_px),
             )
+            # Rejeita artefatos encostados nas margens extremas do scanner / sombras de folha
+            if cand_norm[0] < 0.04 or cand_norm[2] > 0.945 or cand_norm[1] < 0.02 or cand_norm[3] > 0.98:
+                continue
+
+            left_cov = float(dark[y_top : y_bot + 1, max(0, x0 - 2) : min(w_px, x0 + 3)].any(axis=1).mean())
+            right_cov = float(dark[y_top : y_bot + 1, max(0, x1 - 2) : min(w_px, x1 + 3)].any(axis=1).mean())
+            if left_cov < 0.72 or right_cov < 0.72:
+                continue
+
+            interior = arr[y_top + 4 : max(y_top + 5, y_bot - 4), x0 + 4 : max(x0 + 5, x1 - 4)]
+            if interior.size == 0:
+                continue
+            int_std = float(interior.std())
+            if int_std <= 14.0:
+                continue
+
+            # Rejeita células de tabela/fatura que contêm texto impresso nos 78% superiores do quadro
+            # (preservando legendas pequenas "FOTO 3X4" na faixa inferior de molduras fotográficas)
+            upper_body_y1 = cand_norm[1] + (cand_norm[3] - cand_norm[1]) * 0.78
+            interior_toks = _tokens_inside_norm_rect(
+                tokens,
+                cand_norm[0],
+                cand_norm[1],
+                cand_norm[2],
+                upper_body_y1,
+                inset=0.006,
+            )
+            if interior_toks:
+                total_alnum = sum(sum(1 for ch in t.text if ch.isalnum()) for t in interior_toks)
+                if len(interior_toks) >= 2 or total_alnum >= 8:
+                    continue
+
             if any(_boxes_overlap_norm(cand_norm, ex, iou_threshold=0.25) for ex in existing_boxes):
                 continue
 
-            existing_boxes.append(cand_norm)
-            found.append((*cand_norm, 0.86, "SCAN_CONTOUR_3X4_FRAME"))
+            score = (left_cov + right_cov) + min(1.0, int_std / 60.0)
+            scored_candidates.append((score, cand_norm))
+
+    scored_candidates.sort(key=lambda item: -item[0])
+    found: list[tuple[float, float, float, float, float, str]] = []
+    for _score, cand_norm in scored_candidates:
+        if len(found) >= max_candidates:
+            break
+        if any(_boxes_overlap_norm(cand_norm, ex, iou_threshold=0.25) for ex in existing_boxes):
+            continue
+        existing_boxes.append(cand_norm)
+        found.append((*cand_norm, 0.86, "SCAN_CONTOUR_3X4_FRAME"))
 
     return found
+
+
+def _detect_rg_card_visuals(
+    page_number: int,
+    lines: list[UnifiedLine],
+    existing_boxes: list[tuple[float, float, float, float]],
+) -> list[DetectedVisualElement]:
+    """
+    Detecta biometria digital (`POLEGAR DIREITO`), foto 3x4 e assinatura manuscrita em frentes de
+    Carteira de Identidade (RG) escaneadas usando as âncoras textuais oficiais do documento.
+    """
+    polegar_lines = [ln for ln in lines if _POLEGAR_ANCHOR_RE.search(ln.text)]
+    if not polegar_lines:
+        return []
+
+    has_rg_context = any(_ID_CARD_ANCHOR_RE.search(ln.text) for ln in lines)
+    detected: list[DetectedVisualElement] = []
+
+    for ln in polegar_lines:
+        w = max(0.11, min(0.26, ln.x1_norm - ln.x0_norm))
+        cx = 0.5 * (ln.x0_norm + ln.x1_norm)
+
+        # 1. Impressão digital do polegar imediatamente abaixo do rótulo "POLEGAR DIREITO"
+        thumb_box = (
+            _clamp_norm(cx - 0.90 * w),
+            _clamp_norm(ln.y1_norm),
+            _clamp_norm(cx + 0.90 * w),
+            _clamp_norm(min(0.95, ln.y1_norm + 1.80 * w)),
+        )
+        if (thumb_box[2] - thumb_box[0]) >= 0.08 and (thumb_box[3] - thumb_box[1]) >= 0.10:
+            if not any(_boxes_overlap_norm(thumb_box, ex, iou_threshold=0.35) for ex in existing_boxes):
+                existing_boxes.append(thumb_box)
+                detected.append(
+                    DetectedVisualElement(
+                        page_number=page_number,
+                        kind=VisualElementKind.FACIAL_PHOTO,
+                        x0_norm=thumb_box[0],
+                        y0_norm=thumb_box[1],
+                        x1_norm=thumb_box[2],
+                        y1_norm=thumb_box[3],
+                        confidence=0.92,
+                        detection_method="OCR_ANCHOR_BIOMETRIC_THUMBPRINT",
+                    )
+                )
+
+        # 2. Foto 3x4 acima do polegar + assinatura do titular à direita na frente do RG
+        if has_rg_context and ln.y0_norm >= 0.30:
+            photo_box = (
+                _clamp_norm(cx - 0.96 * w),
+                _clamp_norm(max(0.05, ln.y0_norm - 2.15 * w)),
+                _clamp_norm(cx + 0.96 * w),
+                _clamp_norm(max(0.08, ln.y0_norm - 0.15 * w)),
+            )
+            if (photo_box[2] - photo_box[0]) >= 0.10 and (photo_box[3] - photo_box[1]) >= 0.12:
+                if not any(_boxes_overlap_norm(photo_box, ex, iou_threshold=0.35) for ex in existing_boxes):
+                    existing_boxes.append(photo_box)
+                    detected.append(
+                        DetectedVisualElement(
+                            page_number=page_number,
+                            kind=VisualElementKind.FACIAL_PHOTO,
+                            x0_norm=photo_box[0],
+                            y0_norm=photo_box[1],
+                            x1_norm=photo_box[2],
+                            y1_norm=photo_box[3],
+                            confidence=0.91,
+                            detection_method="OCR_ANCHOR_RG_PORTRAIT",
+                        )
+                    )
+
+            sig_x0 = _clamp_norm(cx + 0.85 * w)
+            sig_x1 = _clamp_norm(min(0.92, cx + 1.75 * w))
+            sig_y0 = _clamp_norm(max(0.12, ln.y0_norm - 1.75 * w))
+            sig_y1 = _clamp_norm(min(0.93, ln.y1_norm + 1.70 * w))
+            if (sig_x1 - sig_x0) >= 0.06 and (sig_y1 - sig_y0) >= 0.20:
+                detected.append(
+                    DetectedVisualElement(
+                        page_number=page_number,
+                        kind=VisualElementKind.VISUAL_SIGNATURE,
+                        x0_norm=sig_x0,
+                        y0_norm=sig_y0,
+                        x1_norm=sig_x1,
+                        y1_norm=sig_y1,
+                        confidence=0.88,
+                        detection_method="OCR_ANCHOR_RG_SIGNATURE",
+                    )
+                )
+
+    return detected
 
 
 def _detect_scanned_3x4_photos(
@@ -740,15 +915,31 @@ def _detect_scanned_3x4_photos(
     page_type: PageContentType,
     lines: list[UnifiedLine],
     existing_visuals: list[DetectedVisualElement],
+    tokens: list[UnifiedToken] | None = None,
 ) -> list[DetectedVisualElement]:
     """
-    Detecta automaticamente fotografias/molduras 3x4 em páginas escaneadas (`SCANNED`) ou híbridas (`HYBRID`):
-    1. Âncora textual OCR (`FOTO 3x4` / `FOTO 3X4 ESCANEADA`) localizando a moldura ao redor;
-    2. Varredura geométrica de retângulos verticais 3x4 (`aspect` 0.65..0.85, largura 8%..20% da página)
-       mesmo na ausência da legenda OCR.
+    Detecta automaticamente fotografias/molduras 3x4 e biometria em páginas escaneadas (`SCANNED`)
+    ou híbridas (`HYBRID`):
+    1. Âncoras de RG (`POLEGAR DIREITO`, foto 3x4 e assinatura do titular);
+    2. Âncora textual OCR (`FOTO 3x4` / `FOTO 3X4 ESCANEADA`) localizando a moldura ao redor;
+    3. Varredura geométrica filtrada de retângulos verticais 3x4 sem texto impresso interno.
     """
     if page_type not in (PageContentType.SCANNED, PageContentType.HYBRID):
         return []
+
+    existing_boxes: list[tuple[float, float, float, float]] = [
+        (v.x0_norm, v.y0_norm, v.x1_norm, v.y1_norm)
+        for v in existing_visuals
+        if v.kind == VisualElementKind.FACIAL_PHOTO
+    ]
+    detected: list[DetectedVisualElement] = []
+
+    # 1. Âncoras oficiais de Carteira de Identidade (RG): polegar biométrico + foto + assinatura
+    rg_visuals = _detect_rg_card_visuals(page_number, lines, existing_boxes)
+    if rg_visuals:
+        detected.extend(rg_visuals)
+        # Em páginas de RG já ancoradas, evita varredura não ancorada sobre bordas decorativas do documento
+        return detected
 
     anchor_lines = [ln for ln in lines if _PHOTO_ANCHOR_RE.search(ln.text)]
     if page_type == PageContentType.HYBRID and not anchor_lines:
@@ -762,13 +953,6 @@ def _detect_scanned_3x4_photos(
     page_rect = page.rect
     page_w_pts = max(1.0, float(page_rect.width))
     page_h_pts = max(1.0, float(page_rect.height))
-
-    existing_boxes: list[tuple[float, float, float, float]] = [
-        (v.x0_norm, v.y0_norm, v.x1_norm, v.y1_norm)
-        for v in existing_visuals
-        if v.kind == VisualElementKind.FACIAL_PHOTO
-    ]
-    detected: list[DetectedVisualElement] = []
 
     for ln in anchor_lines:
         x0_n, y0_n, x1_n, y1_n, conf, method = _find_anchor_photo_frame(arr, ln, page_w_pts, page_h_pts)
@@ -789,8 +973,13 @@ def _detect_scanned_3x4_photos(
             )
         )
 
-    if page_type == PageContentType.SCANNED:
-        for x0_n, y0_n, x1_n, y1_n, conf, method in _scan_unanchored_portrait_frames(arr, existing_boxes):
+    joined_page_text = "\n".join(ln.text for ln in lines if ln.text)
+    if page_type == PageContentType.SCANNED and (anchor_lines or not _NON_PORTRAIT_DOC_RE.search(joined_page_text)):
+        for x0_n, y0_n, x1_n, y1_n, conf, method in _scan_unanchored_portrait_frames(
+            arr,
+            existing_boxes,
+            tokens=tokens,
+        ):
             detected.append(
                 DetectedVisualElement(
                     page_number=page_number,
@@ -813,17 +1002,28 @@ def _detect_visual_signatures_and_photos(
     relevant_images: list[_ImageRegionInfo],
     lines: list[UnifiedLine],
     page_type: PageContentType = PageContentType.TEXTUAL,
+    tokens: list[UnifiedToken] | None = None,
 ) -> list[DetectedVisualElement]:
     """
     Identifica caixas delimitadoras de:
-    1. Fotografias 3x4 / faciais (`FACIAL_PHOTO`) em imagens raster embutidas (aspect ratio ~0.60 a 0.92),
-       em âncoras OCR (`FOTO 3x4` / `FOTO 3X4 ESCANEADA`) ou em molduras escaneadas 3x4;
+    1. Fotografias 3x4 / faciais e biometria (`FACIAL_PHOTO`) em imagens raster embutidas
+       (protegendo brasões/logotipos institucionais centralizados no topo da página),
+       em âncoras OCR (`FOTO 3x4`, `POLEGAR DIREITO`) ou em molduras escaneadas 3x4 sem texto interno;
     2. Assinaturas visuais/manuscritas (`VISUAL_SIGNATURE`) em imagens horizontais recortadas
-       (aspect ratio >= 1.8) ou estritamente sobre linhas de traço de assinatura ("________")
-       no terço inferior da página sem jamais invadir parágrafos de texto administrativo.
+       (aspect ratio >= 1.8, fora da faixa de cabeçalho institucional e sem texto impresso OCR interno),
+       sobre linhas de traço de assinatura ("________") ou ao lado de âncoras `Ciente <data>`.
     """
     page_rect = page.rect
     detected: list[DetectedVisualElement] = []
+
+    has_top_institutional_header = any(
+        ln.y0_norm < 0.32 and _INSTITUTIONAL_HEADER_TEXT_RE.search(ln.text)
+        for ln in lines
+    )
+    has_photo_or_id_anchor = any(
+        _PHOTO_ANCHOR_RE.search(ln.text) or _ID_CARD_ANCHOR_RE.search(ln.text)
+        for ln in lines
+    )
 
     for img in relevant_images:
         if img.coverage_ratio > 0.45:
@@ -836,8 +1036,24 @@ def _detect_visual_signatures_and_photos(
             continue
 
         aspect = w_pts / h_pts
+        cx_n = 0.5 * (x0_n + x1_n)
+        inside_toks = _tokens_inside_norm_rect(tokens, x0_n, y0_n, x1_n, y1_n)
+        inside_alnum = sum(sum(1 for ch in t.text if ch.isalnum()) for t in inside_toks)
 
         if 0.60 <= aspect <= 0.92 and 0.008 <= img.coverage_ratio <= 0.18:
+            # Protege brasões oficiais centralizados no cabeçalho (ex.: Brasão TJAM / República / UFAM)
+            is_top_center_crest = (
+                y0_n < 0.22
+                and 0.34 <= cx_n <= 0.66
+                and has_top_institutional_header
+                and not has_photo_or_id_anchor
+            )
+            if is_top_center_crest:
+                continue
+            # Foto facial real não contém bloco extenso de texto impresso no interior
+            if len(inside_toks) >= 3 and inside_alnum >= 12 and not has_photo_or_id_anchor:
+                continue
+
             detected.append(
                 DetectedVisualElement(
                     page_number=page_number,
@@ -851,6 +1067,13 @@ def _detect_visual_signatures_and_photos(
                 )
             )
         elif aspect >= 1.8 and 0.003 <= img.coverage_ratio <= 0.15:
+            # Banners de cabeçalho institucional (ex.: "ESTADO DO AMAZONAS / PODER JUDICIÁRIO")
+            # jamais são assinaturas manuscritas
+            if y0_n < 0.28:
+                continue
+            if len(inside_toks) >= 2 and inside_alnum >= 8:
+                continue
+
             detected.append(
                 DetectedVisualElement(
                     page_number=page_number,
@@ -871,9 +1094,11 @@ def _detect_visual_signatures_and_photos(
             page_type=page_type,
             lines=lines,
             existing_visuals=detected,
+            tokens=tokens,
         )
     )
 
+    gray_arr_cache: np.ndarray | None = None
     for idx, ln in enumerate(lines):
         if _UNDERSCORE_SIGNATURE_LINE_RE.search(ln.text) and ln.y0_norm >= 0.60:
             next_ln = lines[idx + 1] if idx + 1 < len(lines) else None
@@ -890,6 +1115,43 @@ def _detect_visual_signatures_and_photos(
                         detection_method="TEXT_ANCHOR_SIGNATURE_ZONE",
                     )
                 )
+        elif (
+            page_type == PageContentType.SCANNED
+            and ln.y0_norm >= 0.45
+            and ln.x1_norm <= 0.72
+            and _CIENTE_SIGNATURE_RE.search(ln.text)
+        ):
+            # Verifica tinta/traço de assinatura manuscrita à direita de "Ciente DD de mês de AAAA"
+            if gray_arr_cache is None:
+                pix_sig = page.get_pixmap(dpi=100, colorspace=fitz.csGRAY, alpha=False)
+                if pix_sig.width >= 40 and pix_sig.height >= 40:
+                    gray_arr_cache = np.frombuffer(pix_sig.samples, dtype=np.uint8).reshape(
+                        pix_sig.height, pix_sig.width
+                    )
+            if gray_arr_cache is not None:
+                h_px, w_px = gray_arr_cache.shape
+                sx0_n = _clamp_norm(ln.x1_norm + 0.004)
+                sx1_n = _clamp_norm(min(0.86, ln.x1_norm + 0.36))
+                sy0_n = _clamp_norm(max(0.0, ln.y0_norm - 0.032))
+                sy1_n = _clamp_norm(min(0.92, ln.y1_norm + 0.014))
+                px0, px1 = int(sx0_n * w_px), int(sx1_n * w_px)
+                py0, py1 = int(sy0_n * h_px), int(sy1_n * h_px)
+                if (px1 - px0) >= 20 and (py1 - py0) >= 8:
+                    patch = gray_arr_cache[py0:py1, px0:px1]
+                    ink_ratio = float((patch < 200).mean())
+                    if 0.02 <= ink_ratio <= 0.45:
+                        detected.append(
+                            DetectedVisualElement(
+                                page_number=page_number,
+                                kind=VisualElementKind.VISUAL_SIGNATURE,
+                                x0_norm=sx0_n,
+                                y0_norm=sy0_n,
+                                x1_norm=sx1_n,
+                                y1_norm=sy1_n,
+                                confidence=0.84,
+                                detection_method="TEXT_ANCHOR_CIENTE_SIGNATURE",
+                            )
+                        )
 
     return detected
 
@@ -905,7 +1167,7 @@ def extract_single_page(
     """
     Executa a análise posicional completa de **uma única página** (`fitz.Page`):
     - Renderiza opcionalmente a imagem `.webp` a 150 DPI para visualização Thin-Client;
-    - Classifica a página como `TEXTUAL`, `SCANNED` ou `HYBRID`;
+    - Classifica a página como `TEXTUAL`, `SCANNED` ou `HYBRID` (detectando também páginas de texto vetorizado);
     - Extrai texto nativo + tabelas em milissegundos nas páginas `TEXTUAL` / `HYBRID`;
     - Aciona OCR ONNX seletivo a 200 DPI (com fallback a 300 DPI) apenas em páginas `SCANNED`
       ou nas sub-regiões de imagem de páginas `HYBRID`;
@@ -918,7 +1180,18 @@ def extract_single_page(
     native_tokens, native_lines = _extract_native_words_and_lines(page, resolved_page_number)
 
     relevant_images = _collect_relevant_image_regions(page)
-    page_type = classify_page_type(len(native_tokens), relevant_images)
+    vector_drawing_count = 0
+    if len(native_tokens) < 5 and not relevant_images:
+        try:
+            vector_drawing_count = len(page.get_drawings())
+        except Exception:
+            vector_drawing_count = 0
+
+    page_type = classify_page_type(
+        len(native_tokens),
+        relevant_images,
+        vector_drawing_count=vector_drawing_count,
+    )
 
     tokens: list[UnifiedToken] = list(native_tokens)
     lines: list[UnifiedLine] = list(native_lines)
@@ -1018,6 +1291,7 @@ def extract_single_page(
         relevant_images=relevant_images,
         lines=lines,
         page_type=page_type,
+        tokens=tokens,
     )
 
     preview_webp: RenderedPagePreview | None = None

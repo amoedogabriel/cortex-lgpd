@@ -17,7 +17,9 @@ import type {
   AnalysisCompleteEventPayload,
   CustomRegexRule,
   DetectedOccurrence,
+  DocumentOccurrencesResponse,
   DocumentQueueItemState,
+  JobStatus,
   ManualRedactionBox,
   PageData,
   PageReadyEventPayload,
@@ -31,6 +33,35 @@ import type {
 } from "@/types/document";
 
 const MAX_CONCURRENT_UPLOADS = 2;
+const SSE_RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000] as const;
+const SNAPSHOT_SAFETY_POLL_INTERVAL_MS = 2500;
+
+function isAnalysisTerminalStatus(status: JobStatus): boolean {
+  return (
+    status === "AWAITING_REVIEW" ||
+    status === "COMPLETED" ||
+    status === "FAILED"
+  );
+}
+
+function preserveMonotonicProgress(
+  prev: DocumentQueueItemState,
+  nextStageNumber: DocumentQueueItemState["stageNumber"],
+  nextProgressPercent: number | null
+): number | null {
+  if (nextProgressPercent === null) return null;
+  const inSameAnalysisPhase =
+    prev.stageNumber >= 3 &&
+    prev.stageNumber <= 4 &&
+    nextStageNumber >= 3 &&
+    nextStageNumber <= 4 &&
+    prev.jobStatus !== "REDACTING" &&
+    prev.jobStatus !== "VALIDATING";
+  if (inSameAnalysisPhase && prev.progressPercent !== null) {
+    return Math.max(prev.progressPercent, nextProgressPercent);
+  }
+  return nextProgressPercent;
+}
 
 function mergeVerboseLogs(
   existing: VerboseStepLog[],
@@ -131,13 +162,29 @@ export function useDocumentQueue() {
 
   const inFlightUploadsRef = useRef<Set<string>>(new Set());
   const eventSourcesRef = useRef<Map<string, EventSource>>(new Map());
+  const reconnectTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map()
+  );
+  const reconnectAttemptsRef = useRef<Map<string, number>>(new Map());
+  const documentsRef = useRef<DocumentQueueItemState[]>([]);
+  const pollTickCountRef = useRef<number>(0);
+  const openStreamRef = useRef<(clientId: string, jobId: string) => void>(
+    () => {}
+  );
   const latestStageByClientRef = useRef<Map<string, string>>(new Map());
   const mountedRef = useRef<boolean>(true);
+
+  documentsRef.current = documents;
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      for (const timer of reconnectTimersRef.current.values()) {
+        clearTimeout(timer);
+      }
+      reconnectTimersRef.current.clear();
+      reconnectAttemptsRef.current.clear();
       for (const es of eventSourcesRef.current.values()) {
         es.close();
       }
@@ -169,16 +216,35 @@ export function useDocumentQueue() {
     []
   );
 
-  const closeStreamForClient = useCallback((clientId: string) => {
-    const existing = eventSourcesRef.current.get(clientId);
-    if (existing) {
-      existing.close();
-      eventSourcesRef.current.delete(clientId);
+  const clearReconnectForClient = useCallback((clientId: string) => {
+    const timer = reconnectTimersRef.current.get(clientId);
+    if (timer) {
+      clearTimeout(timer);
+      reconnectTimersRef.current.delete(clientId);
     }
+    reconnectAttemptsRef.current.delete(clientId);
   }, []);
 
+  const closeStreamForClient = useCallback(
+    (clientId: string, options?: { clearReconnect?: boolean }) => {
+      if (options?.clearReconnect !== false) {
+        clearReconnectForClient(clientId);
+      }
+      const existing = eventSourcesRef.current.get(clientId);
+      if (existing) {
+        existing.close();
+        eventSourcesRef.current.delete(clientId);
+      }
+    },
+    [clearReconnectForClient]
+  );
+
   const syncDocumentSnapshot = useCallback(
-    async (clientId: string, targetJobId: string) => {
+    async (
+      clientId: string,
+      targetJobId: string,
+      options?: { silent?: boolean }
+    ): Promise<DocumentOccurrencesResponse | null> => {
       try {
         const snapshot = await fetchDocumentOccurrences(targetJobId);
         const logs = snapshot.verbose_logs || [];
@@ -192,7 +258,9 @@ export function useDocumentQueue() {
         const latestStage = latestStageByClientRef.current.get(clientId) || null;
 
         updateDocument(clientId, (prev) => {
-          const mappedPages: Record<number, PageData> = {};
+          const mappedPages: Record<number, PageData> = {
+            ...prev.pagesByNumber,
+          };
           for (const [k, pageVal] of Object.entries(snapshot.pages || {})) {
             const pNum = Number(k);
             mappedPages[pNum] = {
@@ -229,28 +297,53 @@ export function useDocumentQueue() {
             };
           }
 
+          const nextTotalPages = Math.max(
+            prev.totalPages,
+            snapshot.total_pages || 0
+          );
+          const nextProcessedPages = Math.max(
+            prev.processedPages,
+            snapshot.processed_pages || 0,
+            Object.keys(mappedPages).length
+          );
+          const clampedProcessedPages =
+            nextTotalPages > 0
+              ? Math.min(nextTotalPages, nextProcessedPages)
+              : nextProcessedPages;
+
           const derived = derivePipelineProgress({
             jobStatus: snapshot.status,
             latestBackendStage: latestStage,
-            processedPages: snapshot.processed_pages,
-            totalPages: snapshot.total_pages,
+            processedPages: clampedProcessedPages,
+            totalPages: nextTotalPages,
           });
+          const monotonicPercent = preserveMonotonicProgress(
+            prev,
+            derived.stageNumber,
+            derived.progressPercent
+          );
 
           return {
             ...prev,
             badgeStatus: derived.badgeStatus,
             stageNumber: derived.stageNumber,
             stageLabel: derived.stageLabel,
-            progressPercent: derived.progressPercent,
+            progressPercent: monotonicPercent,
             jobStatus: snapshot.status,
             documentProfile: snapshot.document_profile || prev.documentProfile,
-            totalPages: snapshot.total_pages,
-            processedPages: snapshot.processed_pages,
+            totalPages: nextTotalPages,
+            processedPages: clampedProcessedPages,
             isReadyForReview: isReady,
             isAnalysisComplete: isAnalysisDone,
             isRedactionComplete: isRedacted,
             pagesByNumber: mappedPages,
-            occurrences: snapshot.occurrences || [],
+            occurrences:
+              snapshot.occurrences &&
+              snapshot.occurrences.length >= prev.occurrences.length
+                ? snapshot.occurrences
+                : isAnalysisDone || isRedacted
+                  ? snapshot.occurrences || []
+                  : prev.occurrences,
             originalSha256: snapshot.original_file_sha256,
             redactedSha256:
               snapshot.redacted_file_sha256 || prev.redactedSha256,
@@ -264,15 +357,23 @@ export function useDocumentQueue() {
               : null,
           };
         });
+
+        if (snapshot.status === "COMPLETED" || snapshot.status === "FAILED") {
+          closeStreamForClient(clientId);
+        }
+        return snapshot;
       } catch (err) {
-        const msg =
-          err instanceof Error
-            ? err.message
-            : "Erro ao sincronizar estado do documento.";
-        updateDocument(clientId, (prev) => ({
-          ...prev,
-          errorMessage: prev.errorMessage || msg,
-        }));
+        if (!options?.silent) {
+          const msg =
+            err instanceof Error
+              ? err.message
+              : "Erro ao sincronizar estado do documento.";
+          updateDocument(clientId, (prev) => ({
+            ...prev,
+            errorMessage: prev.errorMessage || msg,
+          }));
+        }
+        return null;
       }
     },
     [appendClientVerboseLogs, closeStreamForClient, updateDocument]
@@ -288,7 +389,12 @@ export function useDocumentQueue() {
       const es = new EventSource(streamUrl);
       eventSourcesRef.current.set(clientId, es);
 
+      es.addEventListener("open", () => {
+        reconnectAttemptsRef.current.set(clientId, 0);
+      });
+
       es.addEventListener("verbose_step", (evt: MessageEvent<string>) => {
+        reconnectAttemptsRef.current.set(clientId, 0);
         try {
           const envelope = JSON.parse(
             evt.data
@@ -315,7 +421,11 @@ export function useDocumentQueue() {
               badgeStatus: derived.badgeStatus,
               stageNumber: derived.stageNumber,
               stageLabel: derived.stageLabel,
-              progressPercent: derived.progressPercent,
+              progressPercent: preserveMonotonicProgress(
+                prev,
+                derived.stageNumber,
+                derived.progressPercent
+              ),
             };
           });
         } catch {
@@ -324,6 +434,7 @@ export function useDocumentQueue() {
       });
 
       es.addEventListener("page_ready", (evt: MessageEvent<string>) => {
+        reconnectAttemptsRef.current.set(clientId, 0);
         try {
           const envelope = JSON.parse(
             evt.data
@@ -344,7 +455,11 @@ export function useDocumentQueue() {
               occurrences: payload.occurrences || [],
             };
             const nextPages = { ...prev.pagesByNumber, [pageNum]: updatedPage };
-            const count = Object.keys(nextPages).length;
+            const nextTotal = Math.max(prev.totalPages, payload.total_pages || 0);
+            const count = Math.min(
+              nextTotal > 0 ? nextTotal : Number.MAX_SAFE_INTEGER,
+              Math.max(prev.processedPages, Object.keys(nextPages).length)
+            );
 
             const filteredOccs = prev.occurrences.filter(
               (o) => o.page_number !== pageNum
@@ -360,7 +475,7 @@ export function useDocumentQueue() {
                 latestStageByClientRef.current.get(clientId) ||
                 "ETAPA_3_DETECCAO_LGPD",
               processedPages: count,
-              totalPages: payload.total_pages,
+              totalPages: nextTotal,
             });
 
             return {
@@ -368,7 +483,7 @@ export function useDocumentQueue() {
               jobStatus: payload.status,
               documentProfile:
                 payload.document_profile || prev.documentProfile,
-              totalPages: payload.total_pages,
+              totalPages: nextTotal,
               processedPages: count,
               pagesByNumber: nextPages,
               occurrences: nextOccs,
@@ -376,7 +491,11 @@ export function useDocumentQueue() {
               badgeStatus: derived.badgeStatus,
               stageNumber: derived.stageNumber,
               stageLabel: derived.stageLabel,
-              progressPercent: derived.progressPercent,
+              progressPercent: preserveMonotonicProgress(
+                prev,
+                derived.stageNumber,
+                derived.progressPercent
+              ),
             };
           });
         } catch {
@@ -385,28 +504,39 @@ export function useDocumentQueue() {
       });
 
       es.addEventListener("progress", (evt: MessageEvent<string>) => {
+        reconnectAttemptsRef.current.set(clientId, 0);
         try {
           const envelope = JSON.parse(
             evt.data
           ) as SseEventEnvelope<ProgressEventPayload>;
           const payload = envelope.data;
           updateDocument(clientId, (prev) => {
+            const nextTotal = Math.max(prev.totalPages, payload.total_pages || 0);
+            const nextProcessed = Math.min(
+              nextTotal > 0 ? nextTotal : Number.MAX_SAFE_INTEGER,
+              Math.max(prev.processedPages, payload.processed_pages || 0)
+            );
             const derived = derivePipelineProgress({
               jobStatus: payload.status,
               latestBackendStage: latestStageByClientRef.current.get(clientId),
-              processedPages: payload.processed_pages,
-              totalPages: payload.total_pages,
+              processedPages: nextProcessed,
+              totalPages: nextTotal,
             });
+            const rawPercent =
+              derived.progressPercent ?? Math.round(payload.percentage);
             return {
               ...prev,
               jobStatus: payload.status,
-              processedPages: payload.processed_pages,
-              totalPages: payload.total_pages,
+              processedPages: nextProcessed,
+              totalPages: nextTotal,
               badgeStatus: derived.badgeStatus,
               stageNumber: derived.stageNumber,
               stageLabel: derived.stageLabel,
-              progressPercent:
-                derived.progressPercent ?? Math.round(payload.percentage),
+              progressPercent: preserveMonotonicProgress(
+                prev,
+                derived.stageNumber,
+                rawPercent
+              ),
             };
           });
         } catch {
@@ -415,6 +545,7 @@ export function useDocumentQueue() {
       });
 
       es.addEventListener("analysis_complete", (evt: MessageEvent<string>) => {
+        reconnectAttemptsRef.current.set(clientId, 0);
         try {
           const envelope = JSON.parse(
             evt.data
@@ -424,19 +555,23 @@ export function useDocumentQueue() {
             "ETAPA_4_AGUARDANDO_REVISAO"
           );
           updateDocument(clientId, (prev) => {
+            const nextTotal = Math.max(
+              prev.totalPages,
+              envelope.data.total_pages || 0
+            );
             const derived = derivePipelineProgress({
               jobStatus: envelope.data.status,
               latestBackendStage: "ETAPA_4_AGUARDANDO_REVISAO",
-              processedPages: envelope.data.total_pages,
-              totalPages: envelope.data.total_pages,
+              processedPages: nextTotal,
+              totalPages: nextTotal,
             });
             return {
               ...prev,
               jobStatus: envelope.data.status,
               documentProfile:
                 envelope.data.document_profile || prev.documentProfile,
-              totalPages: envelope.data.total_pages,
-              processedPages: envelope.data.total_pages,
+              totalPages: nextTotal,
+              processedPages: nextTotal,
               isReadyForReview: true,
               isAnalysisComplete: true,
               badgeStatus: derived.badgeStatus,
@@ -452,6 +587,7 @@ export function useDocumentQueue() {
       });
 
       es.addEventListener("redaction_complete", (evt: MessageEvent<string>) => {
+        reconnectAttemptsRef.current.set(clientId, 0);
         try {
           const envelope = JSON.parse(
             evt.data
@@ -497,21 +633,143 @@ export function useDocumentQueue() {
                 progressPercent: null,
                 errorMessage: envelope.data.message || "Falha no processamento.",
               }));
+              closeStreamForClient(clientId);
+              return;
             }
           } catch {
             // Evento nativo de fechamento do EventSource após término do stream
           }
         }
-        closeStreamForClient(clientId);
+
+        // Queda de conexão ou EOF do stream SSE (ex.: timeout de rede/proxy):
+        // fecha a instância atual, ressincroniza via snapshot REST e reconecta com backoff se ainda não concluiu.
+        closeStreamForClient(clientId, { clearReconnect: false });
+
+        void (async () => {
+          if (!mountedRef.current) return;
+          const snapshot = await syncDocumentSnapshot(clientId, jobId, {
+            silent: true,
+          });
+          if (!mountedRef.current) return;
+
+          const latestDoc = documentsRef.current.find(
+            (d) => d.clientId === clientId && d.jobId === jobId
+          );
+          if (!latestDoc) {
+            clearReconnectForClient(clientId);
+            return;
+          }
+
+          const resolvedStatus = snapshot?.status || latestDoc.jobStatus;
+          const stillHasPendingPages =
+            (snapshot?.total_pages ?? latestDoc.totalPages) > 0 &&
+            (snapshot?.processed_pages ?? latestDoc.processedPages) <
+              (snapshot?.total_pages ?? latestDoc.totalPages);
+
+          if (
+            latestDoc.badgeStatus === "Erro" ||
+            latestDoc.badgeStatus === "Concluído" ||
+            (isAnalysisTerminalStatus(resolvedStatus) && !stillHasPendingPages)
+          ) {
+            clearReconnectForClient(clientId);
+            return;
+          }
+
+          const attempt = reconnectAttemptsRef.current.get(clientId) || 0;
+          const delayMs =
+            SSE_RECONNECT_BACKOFF_MS[
+              Math.min(attempt, SSE_RECONNECT_BACKOFF_MS.length - 1)
+            ];
+          reconnectAttemptsRef.current.set(clientId, attempt + 1);
+
+          const prevTimer = reconnectTimersRef.current.get(clientId);
+          if (prevTimer) clearTimeout(prevTimer);
+
+          const timer = setTimeout(() => {
+            reconnectTimersRef.current.delete(clientId);
+            if (!mountedRef.current) return;
+            const docNow = documentsRef.current.find(
+              (d) => d.clientId === clientId && d.jobId === jobId
+            );
+            if (
+              !docNow ||
+              docNow.badgeStatus === "Erro" ||
+              docNow.badgeStatus === "Concluído" ||
+              (isAnalysisTerminalStatus(docNow.jobStatus) &&
+                !(
+                  docNow.totalPages > 0 &&
+                  docNow.processedPages < docNow.totalPages
+                ))
+            ) {
+              return;
+            }
+            openStreamRef.current(clientId, jobId);
+          }, delayMs);
+
+          reconnectTimersRef.current.set(clientId, timer);
+        })();
       });
     },
     [
       appendClientVerboseLogs,
+      clearReconnectForClient,
       closeStreamForClient,
       syncDocumentSnapshot,
       updateDocument,
     ]
   );
+
+  openStreamRef.current = openStreamForDocument;
+
+  // Rede de segurança (polling leve de snapshot enquanto houver documento ativo em análise):
+  // garante que a interface nunca fique congelada caso o SSE caia silenciosamente em proxies ou workers longos.
+  const hasActiveStreamingDocs = useMemo(
+    () =>
+      documents.some(
+        (d) =>
+          Boolean(d.jobId) &&
+          d.badgeStatus !== "Erro" &&
+          d.badgeStatus !== "Concluído" &&
+          (!isAnalysisTerminalStatus(d.jobStatus) ||
+            (d.totalPages > 0 && d.processedPages < d.totalPages))
+      ),
+    [documents]
+  );
+
+  useEffect(() => {
+    if (!hasActiveStreamingDocs) {
+      pollTickCountRef.current = 0;
+      return;
+    }
+
+    const intervalId = setInterval(() => {
+      if (!mountedRef.current) return;
+      pollTickCountRef.current += 1;
+      const isHeartbeatTick = pollTickCountRef.current % 3 === 0;
+
+      for (const doc of documentsRef.current) {
+        if (
+          !doc.jobId ||
+          doc.badgeStatus === "Erro" ||
+          doc.badgeStatus === "Concluído"
+        ) {
+          continue;
+        }
+        const needsSync =
+          !isAnalysisTerminalStatus(doc.jobStatus) ||
+          (doc.totalPages > 0 && doc.processedPages < doc.totalPages);
+        if (!needsSync) continue;
+
+        const es = eventSourcesRef.current.get(doc.clientId);
+        const streamClosedOrMissing = !es || es.readyState !== EventSource.OPEN;
+        if (streamClosedOrMissing || isHeartbeatTick) {
+          void syncDocumentSnapshot(doc.clientId, doc.jobId, { silent: true });
+        }
+      }
+    }, SNAPSHOT_SAFETY_POLL_INTERVAL_MS);
+
+    return () => clearInterval(intervalId);
+  }, [hasActiveStreamingDocs, syncDocumentSnapshot]);
 
   // Seleciona automaticamente o primeiro documento que ficar pronto para revisão
   useEffect(() => {
@@ -728,6 +986,11 @@ export function useDocumentQueue() {
   );
 
   const handleResetAll = useCallback(() => {
+    for (const timer of reconnectTimersRef.current.values()) {
+      clearTimeout(timer);
+    }
+    reconnectTimersRef.current.clear();
+    reconnectAttemptsRef.current.clear();
     for (const es of eventSourcesRef.current.values()) {
       es.close();
     }
@@ -754,6 +1017,34 @@ export function useDocumentQueue() {
     if (!activeDocId) return [];
     return verboseLogsByClient[activeDocId] || [];
   }, [activeDocId, verboseLogsByClient]);
+
+  const activeProcessingPage = useMemo<number | null>(() => {
+    if (!activeDoc) return null;
+    if (
+      activeDoc.isAnalysisComplete ||
+      activeDoc.isRedactionComplete ||
+      activeDoc.badgeStatus === "Erro" ||
+      activeDoc.totalPages <= 0 ||
+      activeDoc.processedPages >= activeDoc.totalPages
+    ) {
+      return null;
+    }
+    for (let i = activeVerboseLogs.length - 1; i >= 0; i -= 1) {
+      const details = activeVerboseLogs[i]?.details;
+      const pNum =
+        details && typeof details.page_number === "number"
+          ? details.page_number
+          : null;
+      if (
+        pNum !== null &&
+        pNum > activeDoc.processedPages &&
+        pNum <= activeDoc.totalPages
+      ) {
+        return pNum;
+      }
+    }
+    return Math.min(activeDoc.totalPages, activeDoc.processedPages + 1);
+  }, [activeDoc, activeVerboseLogs]);
 
   const deselectedSet = useMemo<Set<string>>(
     () => new Set(activeDoc?.deselectedIds || []),
@@ -1239,6 +1530,7 @@ export function useDocumentQueue() {
     activeDocId,
     activeDoc,
     activeVerboseLogs,
+    activeProcessingPage,
     activeStepNumber,
     showAddFilesDropzone,
     setShowAddFilesDropzone,

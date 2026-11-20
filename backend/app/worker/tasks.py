@@ -1024,6 +1024,7 @@ def apply_redaction_task(
     manual_boxes: list[dict[str, Any]] | None = None,
     redaction_items: list[dict[str, Any]] | None = None,
     global_mode: str | None = None,
+    unreviewed_pages: list[int] | None = None,
 ) -> dict[str, Any]:
     """
     Executa o tarjamento/mascaramento físico definitivo de forma idempotente e re-executável
@@ -1060,6 +1061,8 @@ def apply_redaction_task(
         if item_id:
             explicit_item_map[item_id] = item
 
+    unreviewed_page_set: set[int] = {int(p) for p in (unreviewed_pages or [])}
+
     parsed_global_mode: RedactionActionMode | None = None
     if global_mode:
         try:
@@ -1082,6 +1085,7 @@ def apply_redaction_task(
         cat_key = _normalize_category_key(occ.get("category"))
         cat_detected[cat_key] = cat_detected.get(cat_key, 0) + 1
         is_cont = bool(occ.get("is_continuation", False))
+        is_unreviewed_page = int(occ.get("page_number", 0)) in unreviewed_page_set
 
         if occ_id in explicit_item_map:
             raw_mode = str(explicit_item_map[occ_id].get("action_mode", RedactionActionMode.BLACKOUT.value)).upper()
@@ -1090,6 +1094,20 @@ def apply_redaction_task(
             except ValueError:
                 effective_mode = RedactionActionMode.BLACKOUT
             effective_mask_preview = "" if is_cont else (explicit_item_map[occ_id].get("masked_preview") or occ.get("masked_preview"))
+        elif is_unreviewed_page:
+            # Proteção Fail-Closed LGPD: páginas recém-analisadas no catch-up (não vistas pelo revisor)
+            # jamais podem ser marcadas como KEEP pela ausência em selected_ids; aplicam global_mode ou recommended_mode.
+            if parsed_global_mode is not None:
+                effective_mode = parsed_global_mode
+            else:
+                raw_rec_mode = str(
+                    occ.get("recommended_mode") or occ.get("action_mode") or RedactionActionMode.BLACKOUT.value
+                ).upper()
+                try:
+                    effective_mode = RedactionActionMode(raw_rec_mode)
+                except ValueError:
+                    effective_mode = RedactionActionMode.BLACKOUT
+            effective_mask_preview = "" if is_cont else occ.get("masked_preview")
         elif parsed_global_mode is not None and (selected_ids is None or occ_id in selected_set):
             effective_mode = parsed_global_mode
             effective_mask_preview = "" if is_cont else occ.get("masked_preview")
