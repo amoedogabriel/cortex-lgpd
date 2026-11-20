@@ -47,6 +47,12 @@ from app.services.pii_detector.nlp_analyzer import (
     propagate_person_names_across_batch,
 )
 from app.services.pii_detector.regex_patterns import RegexPatternSpec
+from app.services.pii_detector.sei_boilerplate import (
+    SeiPageBoilerplateAnalysis,
+    analyze_sei_boilerplate_zones,
+    is_visual_in_sei_zone,
+    should_ignore_entity_in_sei_zone,
+)
 from app.services.pii_detector.validators import strip_non_digits
 from app.services.redactor.pdf_redactor import generate_masked_preview
 
@@ -782,18 +788,43 @@ def _convert_raw_detections_to_mapped_entities(
     session_salt: str = "",
     document_profile: DocumentProfile = DocumentProfile.RESTRICTED_PROCESS,
     person_canonical_map: dict[str, str] | None = None,
+    ignore_sei_standard_blocks: bool = True,
+    sei_analysis: SeiPageBoilerplateAnalysis | None = None,
 ) -> list[DetectedPIIEntity]:
     """
     Converte as detecções textuais e visuais da página em objetos `DetectedPIIEntity`.
-    Ignora elementos na região de rodapé (`y0_norm > 0.93`).
+    Ignora elementos na região de rodapé (`y0_norm > 0.93`) e, quando `ignore_sei_standard_blocks`
+    está ativo, ignora também cabeçalho padrão do SEI, rodapé institucional SEI e assinatura
+    final de despacho (com Fail-Safe LGPD para CPFs, dados sensíveis e bancários).
     """
     mapped: list[DetectedPIIEntity] = []
     canon_map = person_canonical_map or {}
+    active_sei_analysis = (
+        sei_analysis
+        if sei_analysis is not None
+        else (analyze_sei_boilerplate_zones(page_result) if ignore_sei_standard_blocks else None)
+    )
 
     det_entries: list[tuple[RawTextSpanDetection, list[_LineSubBox], set[tuple[int, int]]]] = []
     for det in raw_detections:
         sub_boxes = _line_bounding_boxes_for_detection(indexed=indexed, det=det)
         non_footer_subs = [s for s in sub_boxes if not is_footer_region(s.y0_norm)]
+        if active_sei_analysis is not None and active_sei_analysis.zones:
+            non_footer_subs = [
+                s
+                for s in non_footer_subs
+                if not should_ignore_entity_in_sei_zone(
+                    entity_type=det.entity_type,
+                    category=det.category,
+                    matched_text=s.line_text or det.matched_text,
+                    detector_source=det.detector_source,
+                    x0_norm=s.x0_norm,
+                    y0_norm=s.y0_norm,
+                    x1_norm=s.x1_norm,
+                    y1_norm=s.y1_norm,
+                    analysis=active_sei_analysis,
+                )
+            ]
         if not non_footer_subs:
             continue
         t_rows = _table_rows_for_subboxes(non_footer_subs, page_result) if document_profile == DocumentProfile.PUBLIC_TRANSPARENCY else set()
@@ -886,6 +917,8 @@ def _convert_raw_detections_to_mapped_entities(
     for vis_idx, vis in enumerate(page_result.visual_elements):
         if is_footer_region(vis.y0_norm):
             continue
+        if active_sei_analysis is not None and is_visual_in_sei_zone(vis, active_sei_analysis):
+            continue
         is_photo = vis.kind == VisualElementKind.FACIAL_PHOTO
         ent_type = "FACIAL_PHOTO" if is_photo else "VISUAL_SIGNATURE"
         vis_category = DataCategory.PERSONAL_SENSITIVE if is_photo else DataCategory.PERSONAL_COMMON
@@ -926,6 +959,7 @@ def propagate_person_names_across_pages(
     *,
     session_salt: str = "",
     document_profile: DocumentProfile = DocumentProfile.RESTRICTED_PROCESS,
+    ignore_sei_standard_blocks: bool = True,
 ) -> list[DetectedPIIEntity]:
     """
     Executa varredura complementar de nomes completos confirmados em outras páginas do mesmo
@@ -970,6 +1004,7 @@ def propagate_person_names_across_pages(
             session_salt=session_salt,
             document_profile=document_profile,
             person_canonical_map=canonical_map,
+            ignore_sei_standard_blocks=ignore_sei_standard_blocks,
         )
         all_entities.extend(page_entities)
 
@@ -982,6 +1017,7 @@ def detect_pii_in_pages(
     session_salt: str = "",
     document_profile: DocumentProfile | None = None,
     custom_regex_specs: Sequence[RegexPatternSpec] | None = None,
+    ignore_sei_standard_blocks: bool = True,
 ) -> list[DetectedPIIEntity]:
     """
     Executa a detecção de PII em lote sobre uma lista de `PageExtractionResult`.
@@ -1004,11 +1040,20 @@ def detect_pii_in_pages(
 
     raw_by_page = analyze_pages_batch(batch_payload, custom_regex_specs=custom_regex_specs)
 
+    sei_analysis_by_page: dict[int, SeiPageBoilerplateAnalysis] = {}
+    ignored_sig_names_all: set[str] = set()
+    if ignore_sei_standard_blocks:
+        for p in pages:
+            sei_res = analyze_sei_boilerplate_zones(p)
+            sei_analysis_by_page[p.page_number] = sei_res
+            ignored_sig_names_all.update(sei_res.ignored_signatory_names)
+
     all_person_names = [
         d.matched_text
         for dets in raw_by_page.values()
         for d in dets
         if d.entity_type in _PERSON_GROUP_TYPES
+        and _normalize_ascii_upper_space(d.matched_text) not in ignored_sig_names_all
     ]
     canonical_map = build_person_canonical_map(all_person_names)
 
@@ -1023,6 +1068,8 @@ def detect_pii_in_pages(
             session_salt=session_salt,
             document_profile=resolved_profile,
             person_canonical_map=canonical_map,
+            ignore_sei_standard_blocks=ignore_sei_standard_blocks,
+            sei_analysis=sei_analysis_by_page.get(p.page_number),
         )
         all_entities.extend(page_entities)
 
@@ -1035,6 +1082,7 @@ def detect_pii_in_single_page(
     session_salt: str = "",
     document_profile: DocumentProfile | None = None,
     custom_regex_specs: Sequence[RegexPatternSpec] | None = None,
+    ignore_sei_standard_blocks: bool = True,
 ) -> list[DetectedPIIEntity]:
     """Atalho para detectar e mapear PII de uma única página extraída (suporte a streaming página a página)."""
     return detect_pii_in_pages(
@@ -1042,4 +1090,5 @@ def detect_pii_in_single_page(
         session_salt=session_salt,
         document_profile=document_profile,
         custom_regex_specs=custom_regex_specs,
+        ignore_sei_standard_blocks=ignore_sei_standard_blocks,
     )

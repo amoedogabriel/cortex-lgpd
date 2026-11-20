@@ -94,7 +94,8 @@ _INSTITUTIONAL_FALSE_PERSON_RE = re.compile(
     r"vossa\s+excel[eê]ncia|polegar\s+direito|polegar\s+esquerdo|pessoa\s+jur[ií]dica|"
     r"juntada\s+de\s*peti[cç][aã]o|n[uú]cleo\s+cidade\s+de\s+deus|visa\s+platinum|"
     r"north\s+bio|ind[uú]stria\s+gr[aá]fica|manaus\s+ambiental|[aá]guas\s+de\s+manaus|"
-    r"vitoria\s+supermerc|vit[oó]ria\s+supermerc|drogaria|supermercado|farm[aá]cia)\b"
+    r"vitoria\s+supermerc|vit[oó]ria\s+supermerc|drogaria|supermercado|farm[aá]cia|"
+    r"encarregad[oa]\s+pelo\s+tratamento|escrit[oó]rio\s+de\s+prote[cç][aã]o\s+de\s+dados)\b"
 )
 
 _EXACT_NON_PERSONAL_BLOCKLIST_RE = re.compile(
@@ -287,6 +288,11 @@ _STRUCTURAL_BLOCKLIST_TOKENS: frozenset[str] = frozenset(
         "TRAVESSA",
         "ALAMEDA",
         "ESTRADA",
+        "ENCARREGADO",
+        "ENCARREGADA",
+        "PORTARIA",
+        "DESPACHO",
+        "ESCRITORIO",
     }
 )
 
@@ -296,7 +302,7 @@ _UFAM_INSTITUTIONAL_ADDRESS_RE = re.compile(
     r"n[uú]cleo\s+cidade\s+de\s+deus|"
     r"rua\s+alexandre\s+amorim)\b)"
 )
-_PUBLIC_OR_CORP_CEP_SET: frozenset[str] = frozenset({"06029900", "69067005", "69010300"})
+_PUBLIC_OR_CORP_CEP_SET: frozenset[str] = frozenset({"06029900", "69067005", "69077000", "69080900", "69010300"})
 _CORP_OR_COURT_ADDRESS_BEFORE_RE = re.compile(
     r"(?i)(?:(?<!cpf/)cnpj\s*[:=-]?|com\s+sede\s+na|poder\s*judici[aá]rio|tribunal\s+de\s+justi[cç]a|"
     r"juizado\s+especial|f[oó]rum\s+|projudi\b|rua\s+alexandre\s+amorim|banco\s+bradesco|n[uú]cleo\s+cidade\s+de\s+deus|"

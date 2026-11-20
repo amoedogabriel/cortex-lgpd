@@ -177,6 +177,7 @@ export interface UploadDocumentResponse {
   file_size_bytes: number;
   total_pages: number;
   processed_pages: number;
+  ignore_sei_standard_blocks?: boolean;
   verbose_logs?: VerboseStepLog[];
   stream_url: string;
   occurrences_url: string;
@@ -253,6 +254,7 @@ export interface DocumentQueueItemState {
   downloadReportUrl: string | null;
   errorMessage: string | null;
   customRegexes?: CustomRegexRule[];
+  ignoreSeiStandardBlocks?: boolean;
   // Estado isolado de revisão HITL por documento
   currentPage: number;
   deselectedIds: string[];

@@ -8,6 +8,7 @@ import { Badge, Button, buttonVariants, Card } from "@/components/ui";
 import { CustomRegexPanel } from "@/components/upload/CustomRegexPanel";
 import { DocumentProgressCard } from "@/components/upload/DocumentProgressCard";
 import { DropzoneUpload } from "@/components/upload/DropzoneUpload";
+import { SeiBoilerplateRuleToggle } from "@/components/upload/SeiBoilerplateRuleToggle";
 import {
   ExportAndReportModal,
   LightweightPageViewer,
@@ -28,6 +29,8 @@ export default function HomePage() {
     setShowAddFilesDropzone,
     customRegexRules,
     setCustomRegexRules,
+    ignoreSeiStandardBlocks,
+    setIgnoreSeiStandardBlocks,
     syncGroupByDefault,
     setSyncGroupByDefault,
     activeOccurrenceId,
@@ -119,6 +122,11 @@ export default function HomePage() {
                     uploadError={null}
                     maxSizeMb={50}
                     compact
+                  />
+                  <SeiBoilerplateRuleToggle
+                    checked={ignoreSeiStandardBlocks}
+                    onChange={setIgnoreSeiStandardBlocks}
+                    disabled={hasAnyUploadInFlight}
                   />
                   <CustomRegexPanel
                     rules={customRegexRules}
@@ -356,6 +364,11 @@ export default function HomePage() {
                 uploadError={null}
                 maxSizeMb={50}
                 compact={false}
+              />
+              <SeiBoilerplateRuleToggle
+                checked={ignoreSeiStandardBlocks}
+                onChange={setIgnoreSeiStandardBlocks}
+                disabled={hasAnyUploadInFlight}
               />
               <CustomRegexPanel
                 rules={customRegexRules}

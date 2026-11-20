@@ -139,6 +139,13 @@ async def upload_document(
         default=None,
         description="JSON opcional contendo lista de regras regex personalizadas (`CustomRegexRule[]`).",
     ),
+    ignore_sei_standard_blocks: bool = Form(
+        default=True,
+        description=(
+            "Quando True (padrão), ignora blocos padronizados do SEI/UFAM: "
+            "cabeçalho institucional, rodapé padrão do SEI e assinatura final de despacho."
+        ),
+    ),
 ) -> dict[str, Any]:
     parsed_custom_rules: list[dict[str, Any]] = []
     if custom_regexes and custom_regexes.strip():
@@ -179,6 +186,7 @@ async def upload_document(
         "pages": {},
         "occurrences": [],
         "custom_regexes": parsed_custom_rules,
+        "ignore_sei_standard_blocks": bool(ignore_sei_standard_blocks),
         "verbose_logs": [],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -199,6 +207,7 @@ async def upload_document(
             "file_size_bytes": validated.file_size_bytes,
             "total_pages": validated.page_count,
             "sha256_prefix": validated.sha256_hash[:16],
+            "ignore_sei_standard_blocks": bool(ignore_sei_standard_blocks),
         },
     )
 
@@ -251,6 +260,7 @@ async def upload_document(
         "file_size_bytes": validated.file_size_bytes,
         "total_pages": validated.page_count,
         "processed_pages": processed_pages,
+        "ignore_sei_standard_blocks": bool(ignore_sei_standard_blocks),
         "verbose_logs": verbose_logs_out,
         "stream_url": f"/api/v1/documents/{job_id_str}/stream",
         "occurrences_url": f"/api/v1/documents/{job_id_str}/occurrences",

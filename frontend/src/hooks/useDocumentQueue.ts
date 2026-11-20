@@ -80,7 +80,8 @@ function mergeVerboseLogs(
 
 function createQueuedDocument(
   file: File,
-  customRegexes?: CustomRegexRule[]
+  customRegexes?: CustomRegexRule[],
+  ignoreSeiStandardBlocks: boolean = true
 ): DocumentQueueItemState {
   const clientId = `doc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   return {
@@ -110,6 +111,7 @@ function createQueuedDocument(
     errorMessage: null,
     customRegexes:
       customRegexes && customRegexes.length > 0 ? customRegexes : undefined,
+    ignoreSeiStandardBlocks,
     currentPage: 1,
     deselectedIds: [],
     actionModesById: {},
@@ -141,6 +143,8 @@ export function useDocumentQueue() {
   const [customRegexRules, setCustomRegexRules] = useState<CustomRegexRule[]>(
     []
   );
+  const [ignoreSeiStandardBlocks, setIgnoreSeiStandardBlocks] =
+    useState<boolean>(true);
   const [verboseLogsByClient, setVerboseLogsByClient] = useState<
     Record<string, VerboseStepLog[]>
   >({});
@@ -823,7 +827,8 @@ export function useDocumentQueue() {
               }));
             },
           },
-          item.customRegexes
+          item.customRegexes,
+          item.ignoreSeiStandardBlocks ?? true
         );
 
         const logs = res.verbose_logs || [];
@@ -915,11 +920,13 @@ export function useDocumentQueue() {
   const handleFilesSelected = useCallback(
     (files: File[]) => {
       if (!files.length) return;
-      const queued = files.map((f) => createQueuedDocument(f, customRegexRules));
+      const queued = files.map((f) =>
+        createQueuedDocument(f, customRegexRules, ignoreSeiStandardBlocks)
+      );
       setDocuments((prev) => [...prev, ...queued]);
       setShowAddFilesDropzone(false);
     },
-    [customRegexRules]
+    [customRegexRules, ignoreSeiStandardBlocks]
   );
 
   const handleSelectForReview = useCallback((clientId: string) => {
@@ -1536,6 +1543,8 @@ export function useDocumentQueue() {
     setShowAddFilesDropzone,
     customRegexRules,
     setCustomRegexRules,
+    ignoreSeiStandardBlocks,
+    setIgnoreSeiStandardBlocks,
     syncGroupByDefault,
     setSyncGroupByDefault,
     activeOccurrenceId,

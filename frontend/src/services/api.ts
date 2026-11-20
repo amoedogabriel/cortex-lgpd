@@ -154,10 +154,12 @@ export function appendRevisionParam(url: string, rev: number = Date.now()): stri
 export async function uploadPdfDocument(
   file: File,
   deferRemainingPages: boolean = true,
-  customRegexes?: CustomRegexRule[]
+  customRegexes?: CustomRegexRule[],
+  ignoreSeiStandardBlocks: boolean = true
 ): Promise<UploadDocumentResponse> {
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("ignore_sei_standard_blocks", String(ignoreSeiStandardBlocks));
   if (customRegexes && customRegexes.length > 0) {
     formData.append(
       "custom_regexes",
@@ -210,11 +212,13 @@ export function uploadPdfDocumentWithProgress(
     onUploadProgress?: (percent: number) => void;
     onUploadBodySent?: () => void;
   },
-  customRegexes?: CustomRegexRule[]
+  customRegexes?: CustomRegexRule[],
+  ignoreSeiStandardBlocks: boolean = true
 ): Promise<UploadDocumentResponse> {
   return new Promise((resolve, reject) => {
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("ignore_sei_standard_blocks", String(ignoreSeiStandardBlocks));
     if (customRegexes && customRegexes.length > 0) {
       formData.append(
         "custom_regexes",

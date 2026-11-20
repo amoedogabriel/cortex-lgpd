@@ -449,3 +449,231 @@ def test_sse_stream_replays_cross_process_pages_and_analysis_complete() -> None:
     assert page_ready_nums == list(range(1, 26)), page_ready_nums
     assert events[-1][0] == "analysis_complete", events[-1]
     assert events[-1][1]["data"]["total_pages"] == 25
+
+
+def _build_synthetic_sei_despacho_pre_signature_pdf() -> bytes:
+    """
+    Gera PDF sintético (100% fictício, Zero-PII) no formato real de Despacho do SEI/UFAM
+    ANTES da assinatura eletrônica e geração de QR Code.
+    """
+    doc = fitz.open()
+    try:
+        # Página 1 — Timbre, Interessado, Corpo com CPF, Assinatura pré-eletrônica e Rodapé SEI multi-linha
+        p1 = doc.new_page(width=595, height=842)
+        p1.insert_text(fitz.Point(225, 118), "Ministério da Educação", fontsize=11)
+        p1.insert_text(fitz.Point(198, 132), "Universidade Federal do Amazonas", fontsize=11)
+        p1.insert_text(fitz.Point(188, 146), "Escritório de Proteção de Dados Pessoais", fontsize=10)
+
+        p1.insert_text(fitz.Point(42, 185), "Processo nº: 23105.000123/2026-01", fontsize=10)
+        p1.insert_text(fitz.Point(42, 200), "Interessado: Mariana Costa Fictícia", fontsize=10)
+        p1.insert_text(fitz.Point(268, 238), "DESPACHO", fontsize=11)
+        p1.insert_text(
+            fitz.Point(42, 280),
+            "Em atendimento à solicitação da interessada Mariana Costa Fictícia, portadora do CPF 528.419.630-98,",
+            fontsize=10,
+        )
+        p1.insert_text(
+            fitz.Point(42, 296),
+            "encaminha-se o presente processo para análise e providências administrativas cabíveis.",
+            fontsize=10,
+        )
+
+        # Bloco final de despacho pré-assinatura (centralizado)
+        p1.insert_text(fitz.Point(220, 555), "Manaus, 12 de março de 2026.", fontsize=10)
+        p1.insert_text(fitz.Point(195, 595), "JOÃO ALBERTO NOGUEIRA FICTÍCIO", fontsize=10)
+        p1.insert_text(fitz.Point(175, 615), "Encarregado pelo Tratamento de Dados Pessoais", fontsize=10)
+        p1.insert_text(fitz.Point(230, 629), "Portaria 101/2026 (9001234)", fontsize=10)
+
+        # Rodapé padrão SEI/UFAM começando em y≈0.885 (acima do corte legado 0.93)
+        p1.insert_text(
+            fitz.Point(42, 755),
+            "Avenida General Rodrigo Octávio, 6200 - Bairro Coroado I Campus Universitário Senador Arthur Virgílio",
+            fontsize=8.5,
+        )
+        p1.insert_text(fitz.Point(42, 769), "Filho - Telefone: (92) 3305-1181", fontsize=8.5)
+        p1.insert_text(
+            fitz.Point(42, 783),
+            "CEP 69080-900, Manaus/AM, escritorio@ufam.edu.br\u200b",
+            fontsize=8.5,
+        )
+        p1.insert_text(
+            fitz.Point(42, 830),
+            "Despacho 9001234 SEI 23105.000123/2026-01 / pg. 1",
+            fontsize=8,
+        )
+
+        # Página 2 — Cabeçalho de continuação SEI e rodapé de paginação
+        p2 = doc.new_page(width=595, height=842)
+        p2.insert_text(fitz.Point(42, 40), "Referência: Processo nº 23105.000123/2026-01", fontsize=8.5)
+        p2.insert_text(fitz.Point(480, 49), "SEI nº 9001234", fontsize=8.5)
+        p2.insert_text(
+            fitz.Point(42, 830),
+            "Despacho 9001234 SEI 23105.000123/2026-01 / pg. 2",
+            fontsize=8,
+        )
+        return doc.tobytes()
+    finally:
+        doc.close()
+
+
+def test_sei_despacho_pre_signature_header_footer_and_closing_ignored_by_default() -> None:
+    """
+    Valida que, com `ignore_sei_standard_blocks=True` (padrão), o timbre do cabeçalho SEI,
+    o bloco de assinatura final de despacho pré-assinatura eletrônica e o rodapé institucional
+    multi-linha do SEI/UFAM são ignorados — preservando 100% dos dados pessoais da interessada
+    no corpo (`Interessado:` e `CPF`) — e que desativar a regra (`False`) volta a detectá-los.
+    """
+    from app.services.pdf_extractor.extractor import extract_single_page
+    from app.services.pii_detector.entity_mapper import detect_pii_in_pages
+    from app.services.pii_detector.sei_boilerplate import analyze_sei_boilerplate_zones
+
+    pdf_bytes = _build_synthetic_sei_despacho_pre_signature_pdf()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        pages = [
+            extract_single_page(doc[i], job_id="sei_pre_sig", page_number=i + 1, render_webp=False)
+            for i in range(len(doc))
+        ]
+    finally:
+        doc.close()
+
+    z1 = analyze_sei_boilerplate_zones(pages[0])
+    z2 = analyze_sei_boilerplate_zones(pages[1])
+    assert z1.has_sei_header and z1.has_sei_footer and z1.has_despacho_signature
+    assert z2.has_sei_header and z2.has_sei_footer
+
+    # Regra ATIVA (padrão)
+    ents_on = detect_pii_in_pages(pages, session_salt="sei_pre_on", ignore_sei_standard_blocks=True)
+    types_on = {e.entity_type for e in ents_on}
+    texts_on = [e.matched_text.upper() for e in ents_on]
+
+    assert "CPF" in types_on
+    assert any("MARIANA COSTA" in t for t in texts_on), texts_on
+    assert not any("JOÃO ALBERTO" in t or "JOAO ALBERTO" in t for t in texts_on), texts_on
+    assert not any("ENCARREGADO" in t for t in texts_on), texts_on
+    assert not any(e.entity_type == "PHONE" for e in ents_on), ents_on
+    assert not any(e.entity_type == "EMAIL" for e in ents_on), ents_on
+    assert not any(e.entity_type == "CEP" for e in ents_on), ents_on
+
+    # Regra DESATIVADA (`False`) volta a detectar signatário, telefone e e-mail do rodapé
+    ents_off = detect_pii_in_pages(pages, session_salt="sei_pre_off", ignore_sei_standard_blocks=False)
+    types_off = {e.entity_type for e in ents_off}
+    texts_off = [e.matched_text.upper() for e in ents_off]
+    assert any("JOÃO ALBERTO" in t or "JOAO ALBERTO" in t for t in texts_off), texts_off
+    assert "PHONE" in types_off
+    assert "EMAIL" in types_off
+
+
+def test_sei_despacho_post_signature_electronic_block_qrcode_and_lgpd_failsafe() -> None:
+    """
+    Valida o despacho SEI pós-assinatura eletrônica (Decreto nº 8.539/2015, bloco de autenticidade,
+    CRC, Criado por e QR Code visual) e garante o Fail-Safe LGPD: CPF ou e-mail pessoal não
+    institucional jamais são suprimidos mesmo se próximos ao fechamento.
+    """
+    from app.services.pdf_extractor.extractor import (
+        DetectedVisualElement,
+        VisualElementKind,
+        extract_single_page,
+    )
+    from app.services.pii_detector.entity_mapper import detect_pii_in_pages
+
+    doc = fitz.open()
+    try:
+        p = doc.new_page(width=595, height=842)
+        p.insert_text(fitz.Point(42, 220), "Atenciosamente,", fontsize=10)
+        p.insert_text(fitz.Point(42, 245), "CARLOS EDUARDO MENDES FICTÍCIO", fontsize=10)
+        p.insert_text(fitz.Point(42, 260), "Pró-Reitor de Administração", fontsize=10)
+        p.insert_text(fitz.Point(42, 275), "Contato pessoal vazado: fulano.pessoal@gmail.com | CPF 528.419.630-98", fontsize=9)
+
+        # Bloco eletrônico SEI + autenticidade
+        p.insert_text(
+            fitz.Point(42, 640),
+            "Documento assinado eletronicamente por Carlos Eduardo Mendes Fictício, Pró-Reitor,",
+            fontsize=9,
+        )
+        p.insert_text(
+            fitz.Point(42, 654),
+            "em 12/03/2026, às 14:22, conforme horário oficial de Brasília, com fundamento no art. 6º,",
+            fontsize=9,
+        )
+        p.insert_text(
+            fitz.Point(42, 668),
+            "§ 1º, do Decreto nº 8.539, de 8 de outubro de 2015.",
+            fontsize=9,
+        )
+        p.insert_text(
+            fitz.Point(120, 700),
+            "A autenticidade deste documento pode ser conferida no site https://sei.ufam.edu.br/sei/controlador_externo.php,",
+            fontsize=8.5,
+        )
+        p.insert_text(
+            fitz.Point(120, 714),
+            "informando o código verificador 9001234 e o código CRC ABCD1234.",
+            fontsize=8.5,
+        )
+        p.insert_text(
+            fitz.Point(42, 742),
+            "Criado por usuario_ficticio, versão 2 por usuario_ficticio em 12/03/2026 14:20:00.",
+            fontsize=8,
+        )
+        page_ext = extract_single_page(p, job_id="sei_post_sig", page_number=1, render_webp=False)
+    finally:
+        doc.close()
+
+    # Simula QR Code de autenticidade detectado ao lado do texto de conferência
+    page_ext.visual_elements.append(
+        DetectedVisualElement(
+            page_number=1,
+            kind=VisualElementKind.VISUAL_SIGNATURE,
+            x0_norm=0.06,
+            y0_norm=0.81,
+            x1_norm=0.18,
+            y1_norm=0.88,
+            confidence=0.90,
+            detection_method="QR_SIMULATED",
+        )
+    )
+
+    ents = detect_pii_in_pages([page_ext], session_salt="sei_post_sig", ignore_sei_standard_blocks=True)
+    texts_up = [e.matched_text.upper() for e in ents]
+    types = {e.entity_type for e in ents}
+
+    assert not any("CARLOS EDUARDO" in t for t in texts_up), texts_up
+    assert "VISUAL_SIGNATURE" not in types, ents
+    # Fail-Safe LGPD: CPF e e-mail pessoal não institucional permanecem detectados
+    assert "CPF" in types, types
+    assert any(e.entity_type == "EMAIL" and "gmail.com" in e.matched_text.lower() for e in ents), ents
+
+
+def test_upload_endpoint_respects_ignore_sei_standard_blocks_form_flag() -> None:
+    """Valida o parâmetro configurável `ignore_sei_standard_blocks` no endpoint `/upload`."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    pdf_bytes = _build_synthetic_sei_despacho_pre_signature_pdf()
+    client = TestClient(app)
+
+    # 1. Padrão (True): ignora rodapé/cabeçalho/assinatura SEI
+    res_on = client.post(
+        "/api/v1/documents/upload?defer_remaining_pages=false",
+        files={"file": ("despacho_sei.pdf", pdf_bytes, "application/pdf")},
+        data={"ignore_sei_standard_blocks": "true"},
+    )
+    assert res_on.status_code == 202, res_on.text
+    body_on = res_on.json()
+    assert body_on["ignore_sei_standard_blocks"] is True
+    occs_on = client.get(f"/api/v1/documents/{body_on['job_id']}/occurrences").json()["occurrences"]
+    assert not any(o["entity_type"] in ("PHONE", "EMAIL") for o in occs_on), occs_on
+
+    # 2. Desativado (False): inclui telefone e e-mail do rodapé SEI
+    res_off = client.post(
+        "/api/v1/documents/upload?defer_remaining_pages=false",
+        files={"file": ("despacho_sei.pdf", pdf_bytes, "application/pdf")},
+        data={"ignore_sei_standard_blocks": "false"},
+    )
+    assert res_off.status_code == 202, res_off.text
+    body_off = res_off.json()
+    assert body_off["ignore_sei_standard_blocks"] is False
+    occs_off = client.get(f"/api/v1/documents/{body_off['job_id']}/occurrences").json()["occurrences"]
+    assert any(o["entity_type"] == "PHONE" for o in occs_off), occs_off
+    assert any(o["entity_type"] == "EMAIL" for o in occs_off), occs_off

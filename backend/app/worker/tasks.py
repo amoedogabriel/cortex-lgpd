@@ -571,11 +571,13 @@ def _propagate_person_names_across_job_state(
     except ValueError:
         detected_profile = DocumentProfile.RESTRICTED_PROCESS
 
+    ignore_sei_blocks = bool(state.get("ignore_sei_standard_blocks", True))
     propagated = propagate_person_names_across_pages(
         all_page_results,
         list(confirmed_by_key.values()),
         session_salt=str(job_id),
         document_profile=detected_profile,
+        ignore_sei_standard_blocks=ignore_sei_blocks,
     )
     if not propagated:
         if modified_pages_set:
@@ -760,11 +762,13 @@ def process_single_page_into_state(
 
     raw_custom_rules = state.get("custom_regexes") or []
     custom_specs = compile_custom_regex_specs(raw_custom_rules) if raw_custom_rules else None
+    ignore_sei_blocks = bool(state.get("ignore_sei_standard_blocks", True))
     entities = detect_pii_in_single_page(
         page_ext,
         session_salt=job_id,
         document_profile=detected_profile,
         custom_regex_specs=custom_specs,
+        ignore_sei_standard_blocks=ignore_sei_blocks,
     )
     pii_elapsed_ms = (time.perf_counter() - t_pii_start) * 1000.0
 

@@ -680,4 +680,59 @@ test.describe("Caracterização de UI e Contrato Funcional (Pré/Pós-Refatoraç
     expect(capturedUploadPayloads[0]).toContain("CODIGO_PROEG");
     expect(capturedUploadPayloads[0]).toContain("PERSONAL_SENSITIVE");
   });
+
+  test("6. Regra configurável de blocos padrão SEI vem ativa por padrão e envia ignore_sei_standard_blocks no upload", async ({
+    page,
+  }) => {
+    const capturedUploadPayloads: string[] = [];
+    await setupMockBackend(page);
+    await page.route("**/api/v1/documents/upload*", async (route) => {
+      const postData = route.request().postData() || "";
+      capturedUploadPayloads.push(postData);
+      await route.fallback();
+    });
+
+    await page.goto("/");
+
+    const seiCheckbox = page.getByTestId("toggle-ignore-sei-blocks-checkbox");
+    const seiPanel = page.getByTestId("sei-boilerplate-rule-panel");
+    await expect(seiCheckbox).toBeVisible();
+    await expect(seiCheckbox).toBeChecked();
+    await expect(seiPanel).toContainText("Ativo por padrão");
+
+    // 1. Upload com regra ativa (padrão) -> envia ignore_sei_standard_blocks=true
+    await page.getByTestId("pdf-file-input").setInputFiles([
+      {
+        name: "despacho_sei_padrao.pdf",
+        mimeType: "application/pdf",
+        buffer: SAMPLE_PDF_BUFFER,
+      },
+    ]);
+    await expect(
+      page.getByRole("article", { name: /Progresso do documento despacho_sei_padrao\.pdf/i })
+    ).toBeVisible({ timeout: 10000 });
+    expect(capturedUploadPayloads.length).toBe(1);
+    expect(capturedUploadPayloads[0]).toContain('name="ignore_sei_standard_blocks"');
+    expect(capturedUploadPayloads[0]).toMatch(/name="ignore_sei_standard_blocks"\r?\n\r?\ntrue/);
+
+    // 2. Abre painel "+ Anexar Mais PDFs", desativa a regra e envia -> ignore_sei_standard_blocks=false
+    await page.getByRole("button", { name: /Anexar Mais PDFs/i }).click();
+    const compactCheckbox = page.getByTestId("toggle-ignore-sei-blocks-checkbox");
+    await expect(compactCheckbox).toBeChecked();
+    await compactCheckbox.uncheck();
+    await expect(page.getByTestId("sei-boilerplate-rule-panel")).toContainText("Desativado");
+
+    await page.getByTestId("pdf-file-input").setInputFiles([
+      {
+        name: "despacho_sei_completo.pdf",
+        mimeType: "application/pdf",
+        buffer: SAMPLE_PDF_BUFFER,
+      },
+    ]);
+    await expect(
+      page.getByRole("article", { name: /Progresso do documento despacho_sei_completo\.pdf/i })
+    ).toBeVisible({ timeout: 10000 });
+    expect(capturedUploadPayloads.length).toBe(2);
+    expect(capturedUploadPayloads[1]).toMatch(/name="ignore_sei_standard_blocks"\r?\n\r?\nfalse/);
+  });
 });
